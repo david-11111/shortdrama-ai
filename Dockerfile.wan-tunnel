@@ -1,0 +1,7 @@
+FROM saas--api:latest
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client sshpass \
+    && rm -rf /var/lib/apt/lists/*
+
+CMD ["sh", "-c", "while true; do echo '[wan-tunnel] Starting SSH tunnel...'; sshpass -p \"$WAN_SSH_PASSWORD\" ssh -CNg -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=15 -o ServerAliveCountMax=5 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -L 0.0.0.0:8100:127.0.0.1:8100 root@connect.cqa1.seetacloud.com -p 14158; echo '[wan-tunnel] SSH tunnel disconnected. Reconnecting in 3s...'; sleep 3; done"]

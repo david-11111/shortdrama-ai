@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Environment
+.env
+.env.*
+venv/
+node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+
+# Storage
+storage/
+
+# Model weights
+*.safetensors
+
+# Third-party
+Pixelle-Video-main/
+
+# Copies
+saas - 副本*/
+*- 副本*/
+
+# Testing
+.pytest_cache/
+.pytest-wan-tmp/
+pytest-cache-files-*/
+pytest-temp/
+E:/tmp/
+
+# Logs
+*.log
+celerybeat-schedule*
+
+# Local git repair backup
+.git.broken-saas-git-pointer
+# OS
+.DS_Store
+Thumbs.db

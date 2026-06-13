@@ -1,0 +1,196 @@
+{
+  "total_genres": 27,
+  "covered_genres": 0,
+  "missing_genres": 27,
+  "results": [
+    {
+      "key": "urban_romance",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "sweet_romance",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "tragic_romance",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "domineering_ceo",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "marriage_first",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "substitute_love",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "revenge_counterattack",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "rebirth",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "time_travel",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "system_flow",
+      "name": "???",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "ancient_romance",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "xianxia",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "wuxia",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "palace_intrigue",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "suspense",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "crime",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "fantasy",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "campus",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "workplace",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "family_ethics",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "mother_baby",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "female_growth",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "male_growth",
+      "name": "????",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "period_drama",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "rural",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "comedy",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    },
+    {
+      "key": "healing",
+      "name": "??",
+      "status": "missing",
+      "hit_count": 0,
+      "sample_hits": []
+    }
+  ]
+}

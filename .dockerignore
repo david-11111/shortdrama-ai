@@ -1,0 +1,38 @@
+# Default-deny Docker context.
+# Keep the API image small and prevent unreadable local temp folders from
+# breaking builds before Docker can apply narrow ignore rules.
+*
+
+!Dockerfile
+!Dockerfile.wan-tunnel
+!Dockerfile.nginx.local
+!requirements.txt
+!alembic.ini
+!pyproject.toml
+
+!app/
+!app/**
+!monitoring/
+!monitoring/**
+!alembic/
+!alembic/**
+!data/
+!data/**
+!frontend/
+!frontend/**
+
+# Runtime-created directories must not be baked into the image.
+storage
+storage/**
+
+# Local generated folders that have caused Windows ACL failures.
+.docker-build
+.docker-build/**
+.pytest_cache
+.pytest_cache/**
+.pytest-wan-tmp
+.pytest-wan-tmp/**
+pytest-temp
+pytest-temp/**
+pytest-cache-files-*
+pytest-cache-files-*/**

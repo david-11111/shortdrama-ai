@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "dimensions": [
+    {
+      "key": "library_hit",
+      "name": "库命中质量",
+      "description": "命中条目是否与场景语义匹配，Top1是否准确",
+      "weight": 0.25
+    },
+    {
+      "key": "prompt_quality",
+      "name": "提示词质量",
+      "description": "生成的Seedance提示词是否包含镜头包、禁忌项、情绪约束",
+      "weight": 0.25
+    },
+    {
+      "key": "video_output",
+      "name": "视频成片达标",
+      "description": "生成视频是否符合场景情绪、镜头语言、人物一致性要求",
+      "weight": 0.3
+    },
+    {
+      "key": "rework_count",
+      "name": "返工次数",
+      "description": "从初稿到采用版本的迭代次数，越少越好",
+      "weight": 0.1
+    },
+    {
+      "key": "chain_trace",
+      "name": "链路可追溯",
+      "description": "是否能完整回溯：用了哪些库、命中了哪些词组、最终采用哪个版本",
+      "weight": 0.1
+    }
+  ],
+  "score_levels": [
+    {
+      "level": "A",
+      "range": "90-100",
+      "description": "直接采用，无需返工"
+    },
+    {
+      "level": "B",
+      "range": "75-89",
+      "description": "小幅调整后采用"
+    },
+    {
+      "level": "C",
+      "range": "60-74",
+      "description": "需要重新标注或调整预设"
+    },
+    {
+      "level": "D",
+      "range": "0-59",
+      "description": "需要返工，检查库命中逻辑"
+    }
+  ]
+}

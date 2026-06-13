@@ -1,0 +1,62 @@
+{
+  "version": "creative_enhancer_v1",
+  "structure": ["起", "因", "反", "升", "爽", "合"],
+  "dimensions": [
+    {
+      "id": "hook_strength",
+      "label": "钩子强度",
+      "weight": 0.22,
+      "threshold": 80,
+      "action": "补首屏冲突与反差动作，前3秒明确问题感。"
+    },
+    {
+      "id": "highlight_density",
+      "label": "爽点密度",
+      "weight": 0.16,
+      "threshold": 75,
+      "action": "每15秒至少放一个情绪或信息兑现点。"
+    },
+    {
+      "id": "pace_rhythm",
+      "label": "节奏步调",
+      "weight": 0.12,
+      "threshold": 75,
+      "action": "镜头长短交替，加入转场切点和节奏递进。"
+    },
+    {
+      "id": "continuity",
+      "label": "情节连贯",
+      "weight": 0.14,
+      "threshold": 80,
+      "action": "补足因果桥接句，保证事件闭环。"
+    },
+    {
+      "id": "character_appeal",
+      "label": "角色吸引力",
+      "weight": 0.1,
+      "threshold": 75,
+      "action": "补人物目标、缺陷与可记忆反差点。"
+    },
+    {
+      "id": "dialogue_quality",
+      "label": "对白质量",
+      "weight": 0.08,
+      "threshold": 75,
+      "action": "对白口语化、短句化，减少抽象空话。"
+    },
+    {
+      "id": "suspense_effectiveness",
+      "label": "悬念有效性",
+      "weight": 0.08,
+      "threshold": 70,
+      "action": "增加未完成目标与下一步期待。"
+    },
+    {
+      "id": "market_fit",
+      "label": "爆款契合度",
+      "weight": 0.1,
+      "threshold": 75,
+      "action": "增强题材标签和平台化表达。"
+    }
+  ]
+}

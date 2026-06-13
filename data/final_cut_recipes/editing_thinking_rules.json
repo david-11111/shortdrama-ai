@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-16",
+  "items": [
+    {
+      "id": "classical_shot_continuity",
+      "name": "古法剪辑：镜头组接连续性",
+      "category": "shot_language",
+      "source_type": "creator_tutorial",
+      "difficulty": "advanced",
+      "commercial_value": "high",
+      "ffmpeg_feasibility": "planning_rule",
+      "needs_ai": ["shot_semantic_analysis", "shot_size_detection", "subject_direction_detection"],
+      "needs_assets": [],
+      "summary": "避免 AI 机械拼接导致的生硬跳切，用过渡镜头、视角变化、景别变化来保持叙事顺滑。",
+      "rules": [
+        "两个主体镜头之间可以插入无明显方向感的过渡镜头，例如手部特写、梳头特写、环境空镜。",
+        "当画面视角方向违和时，可以对素材做水平镜像翻转来修正视线或运动方向。",
+        "同一动作不要连续拼接视角高度一致、景别几乎相同的镜头，除非明确要制造跳切风格。",
+        "连续动作组接时优先切换到 30 度侧拍、90 度正侧拍、中景、全景等差异足够大的镜头。",
+        "剪辑计划必须先判断情绪、叙事节奏和镜头语言，再交给 FFmpeg 做执行。"
+      ],
+      "planner_actions": [
+        "detect_repeated_same_angle",
+        "insert_neutral_cutaway",
+        "prefer_shot_size_variation",
+        "suggest_horizontal_flip_when_direction_conflicts"
+      ],
+      "user_controls": [
+        {"key": "allow_artistic_jump_cut", "label": "允许刻意跳切", "type": "boolean", "default": false},
+        {"key": "continuity_strictness", "label": "连续性严格度", "type": "select", "options": ["balanced", "strict"], "default": "balanced"}
+      ]
+    },
+    {
+      "id": "travel_vlog_segmented_story",
+      "name": "分段剪辑：告别流水账旅拍 Vlog",
+      "category": "narrative_structure",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "high",
+      "ffmpeg_feasibility": "planning_rule",
+      "needs_ai": ["material_classification", "music_mood_matching"],
+      "needs_assets": ["bgm_by_mood", "transition_sfx"],
+      "summary": "旅拍不要按时间流水账一首 BGM 剪到底，而是按情绪、内容、节奏分段讲故事。",
+      "structure": [
+        {
+          "segment": "平静叙事",
+          "music": "舒缓纯音乐",
+          "shot_duration_sec": [5, 8],
+          "material": ["风景", "慢动作特写", "环境空镜"]
+        },
+        {
+          "segment": "热闹活泼",
+          "music": "轻快节奏",
+          "shot_duration_sec": [2, 4],
+          "material": ["人物与当地元素互动", "美食细节", "街景碎片", "快切转场"]
+        },
+        {
+          "segment": "治愈升华",
+          "music": "氛围感音乐",
+          "shot_duration_sec": [5, 8],
+          "material": ["航拍大景", "全景", "长镜头留白"]
+        }
+      ],
+      "required_material_types": [
+        "慢动作特写",
+        "人物与当地元素互动",
+        "航拍大景",
+        "延时或空镜",
+        "美食、光影、纹理等细节碎片"
+      ],
+      "formula": [
+        "开场 7 秒氛围音加音效，制造悬念钩子。",
+        "用空镜或特写作为段落转场。",
+        "中段快切和慢镜穿插，保持张弛。",
+        "结尾用全景和氛围音乐留白。"
+      ],
+      "planner_actions": [
+        "split_by_emotion",
+        "assign_bgm_per_segment",
+        "vary_clip_duration_slow_fast_slow",
+        "reserve_final_long_shot"
+      ],
+      "user_controls": [
+        {"key": "segment_count", "label": "情绪段落数", "type": "number", "default": 3, "min": 2, "max": 3},
+        {"key": "ending_hold_sec", "label": "结尾留白秒数", "type": "number", "default": 6, "min": 3, "max": 10}
+      ]
+    },
+    {
+      "id": "music_bridge_three_methods",
+      "name": "音乐衔接：三种无缝接歌方法",
+      "category": "audio_editing",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "high",
+      "ffmpeg_feasibility": "executable_audio_rule",
+      "needs_ai": ["audio_peak_detection", "music_mood_matching"],
+      "needs_assets": ["wind_sfx", "riser_sfx", "hit_sfx"],
+      "summary": "根据两段音乐风格和能量差异，选择淡入淡出、重音对接或音效搭桥。",
+      "methods": [
+        {
+          "name": "淡入淡出",
+          "best_for": "同风格轻音乐或舒缓温柔音乐",
+          "execution": "前一段淡出，后一段淡入，过渡平缓。"
+        },
+        {
+          "name": "重音对接",
+          "best_for": "节奏卡点混剪、轻快转激昂",
+          "execution": "找到两首歌鼓点或重音峰值，对齐裁切，中间可加重击音效。"
+        },
+        {
+          "name": "音效搭桥",
+          "best_for": "快慢、高低、冷暖反差很大的音乐",
+          "execution": "前段在高音处戛然而止，用风声、上升、撞击音效盖住接缝。"
+        }
+      ],
+      "golden_rule": "弱接弱、强接强、高接高、落点接起点；用音效遮断层，音乐顺情绪。",
+      "planner_actions": [
+        "detect_audio_energy",
+        "align_peak_to_peak",
+        "choose_crossfade_or_sfx_bridge",
+        "insert_transition_sfx"
+      ],
+      "user_controls": [
+        {"key": "bridge_style", "label": "接歌方式", "type": "select", "options": ["auto", "crossfade", "beat_match", "sfx_bridge"], "default": "auto"},
+        {"key": "crossfade_sec", "label": "淡入淡出秒数", "type": "number", "default": 1.2, "min": 0.3, "max": 3}
+      ]
+    },
+    {
+      "id": "closeup_group_to_wide_tension",
+      "name": "特写镜头组 + 大全景：视觉张力节奏",
+      "category": "shot_language",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "high",
+      "ffmpeg_feasibility": "planning_rule",
+      "needs_ai": ["shot_size_detection", "emotion_intensity_detection"],
+      "needs_assets": [],
+      "summary": "先用特写镜头组快切加剧紧张情绪，再用大全景释放空间感，形成有起有伏的节奏。",
+      "rules": [
+        "特写镜头组适合表现情绪、细节和压迫感。",
+        "特写组内可以使用更短镜头和快切来加剧紧张。",
+        "大全景适合呈现舒缓、开阔、释放后的空间感。",
+        "特写组接大全景时，镜头节奏应从密集转为舒展，形成视觉张力落差。"
+      ],
+      "default_timing": {
+        "closeup_clip_sec": [0.8, 2.0],
+        "wide_clip_sec": [4.0, 8.0],
+        "closeup_group_count": [3, 5]
+      },
+      "planner_actions": [
+        "group_closeups_before_release",
+        "increase_cut_density_for_tension",
+        "place_wide_shot_after_closeup_cluster",
+        "extend_wide_shot_for_breathing_room"
+      ],
+      "user_controls": [
+        {"key": "tension_strength", "label": "张力强度", "type": "select", "options": ["soft", "balanced", "strong"], "default": "balanced"},
+        {"key": "wide_release_hold_sec", "label": "大全景停留秒数", "type": "number", "default": 5, "min": 3, "max": 10}
+      ]
+    },
+    {
+      "id": "cinematic_pacing_slow_fast_slow",
+      "name": "大片感/高级感节奏：慢-快-慢",
+      "category": "pacing",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "high",
+      "ffmpeg_feasibility": "planning_rule",
+      "needs_ai": ["emotion_intensity_detection", "shot_type_detection"],
+      "needs_assets": ["cutaway_shots_optional"],
+      "summary": "大片感和高级感不是堆特效滤镜，也不是镜头越快越好，而是根据情绪控制镜头时长，并用慢-快-慢制造起伏。",
+      "pacing_map": [
+        {
+          "pace": "fast",
+          "shot_duration_sec": [1, 3],
+          "best_for": ["高能", "紧张", "热闹", "动作片段", "卡点混剪", "城市街拍"],
+          "effect": "快速切换放大冲击力。"
+        },
+        {
+          "pace": "medium",
+          "shot_duration_sec": [4, 6],
+          "best_for": ["日常叙事", "对话", "普通场景"],
+          "effect": "自然流畅不拖沓，让观众有时间接收信息。"
+        },
+        {
+          "pace": "slow",
+          "shot_duration_sec": [7, 10],
+          "best_for": ["氛围感", "情绪升华", "风景镜头", "日落", "人物特写", "结尾留白"],
+          "effect": "拉长镜头沉淀情绪。"
+        }
+      ],
+      "structure": [
+        "开场用慢节奏全景或空镜铺垫氛围。",
+        "中段用快节奏特写和动作镜头推进情节，制造高潮。",
+        "结尾回归慢节奏，呼应开头，让情绪落地。"
+      ],
+      "rules": [
+        "不要全片单一节奏，否则观众容易疲劳。",
+        "剧情转折或情绪切换时，插入 1 到 2 秒空镜或特写作为缓冲。",
+        "节奏应跟着故事和情绪走，而不是盲目堆镜头。",
+        "剪辑的本质是控制观众的情绪流动，让节奏为故事服务。"
+      ],
+      "planner_actions": [
+        "assign_duration_by_emotion",
+        "build_slow_fast_slow_arc",
+        "insert_short_cutaway_on_emotion_shift",
+        "reserve_slow_ending_for_emotional_landing"
+      ],
+      "user_controls": [
+        {"key": "pacing_profile", "label": "节奏策略", "type": "select", "options": ["auto", "slow_fast_slow", "fast_cut", "slow_mood"], "default": "slow_fast_slow"},
+        {"key": "cutaway_buffer_sec", "label": "空镜缓冲秒数", "type": "number", "default": 1.5, "min": 1, "max": 2}
+      ]
+    }
+  ]
+}

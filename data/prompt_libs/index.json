@@ -1,0 +1,293 @@
+{
+  "version": 1,
+  "settings": {
+    "default_top_k": {
+      "script": 5,
+      "shot": 4,
+      "ref_image": 3,
+      "repair": 4
+    },
+    "base_limits": {
+      "script": 6,
+      "shot": 3,
+      "ref_image": 3,
+      "repair": 3
+    },
+    "style_library_limit": 2,
+    "context_mode": "enhanced",
+    "group_limits": {
+      "style": 2,
+      "shot": 3,
+      "dialogue": 3
+    },
+    "stage_context_weights": {
+      "script": {
+        "query": 1.25,
+        "global": 1.8,
+        "local": 1.0,
+        "failure": 0.8,
+        "style": 1.9
+      },
+      "shot": {
+        "query": 1.1,
+        "global": 1.2,
+        "local": 1.9,
+        "failure": 1.0,
+        "style": 1.3
+      },
+      "ref_image": {
+        "query": 1.0,
+        "global": 1.35,
+        "local": 1.85,
+        "failure": 0.8,
+        "style": 1.5
+      },
+      "repair": {
+        "query": 0.9,
+        "global": 0.8,
+        "local": 1.2,
+        "failure": 2.4,
+        "style": 0.9
+      }
+    }
+  },
+  "overrides": {
+    "9": {
+      "group": "shot",
+      "priority": 5,
+      "tags": ["场景", "空间拓扑", "透视", "构图"],
+      "triggers": ["场景切换", "空间关系", "透视稳定", "布景一致"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["透视乱", "空间崩", "背景乱变"]
+    },
+    "10": {
+      "group": "style",
+      "priority": 4,
+      "tags": ["氛围", "意境", "情绪", "沉浸感"],
+      "triggers": ["氛围戏", "情绪戏", "沉浸感", "意境"],
+      "stages": ["script", "shot", "ref_image", "repair"]
+    },
+    "11": {
+      "group": "style",
+      "priority": 4,
+      "tags": ["色彩", "色调", "影调", "高级感"],
+      "triggers": ["冷暖", "调色", "风格统一", "电影色调"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["色彩跳", "肤色飘", "串色"]
+    },
+    "12": {
+      "group": "specialized",
+      "priority": 4,
+      "tags": ["天气", "时辰", "季节", "环境"],
+      "triggers": ["下雨", "大雪", "黄昏", "深夜", "黎明"],
+      "stages": ["script", "shot", "ref_image", "repair"]
+    },
+    "13": {
+      "group": "character",
+      "priority": 5,
+      "tags": ["微表情", "眼神", "神态", "人物情绪"],
+      "triggers": ["close-up", "特写", "眼神戏", "无台词表演"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["表情假", "眼神空", "情绪不对"]
+    },
+    "32": {
+      "group": "dialogue",
+      "priority": 4,
+      "tags": ["配音", "口型", "角色发声", "旁白"],
+      "triggers": ["配音", "旁白", "独白", "口型同步"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "33": {
+      "group": "character",
+      "priority": 5,
+      "tags": ["角色一致性", "人设", "人物稳定", "跨镜统一"],
+      "triggers": ["人设统一", "角色不换脸", "长相稳定", "人物一致"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["换脸", "人设崩", "气质跳"]
+    },
+    "34": {
+      "group": "character",
+      "priority": 4,
+      "tags": ["表演尺度", "情绪控制", "人物状态"],
+      "triggers": ["克制表演", "写实表演", "情绪尺度", "不夸张"],
+      "stages": ["script", "shot", "repair"],
+      "negative_rules": ["演过头", "表演假", "情绪失真"]
+    },
+    "35": {
+      "group": "shot",
+      "priority": 4,
+      "tags": ["多人同框", "站位", "互动", "群像调度"],
+      "triggers": ["多人对话", "同框", "对峙站位", "群像戏"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["抢戏", "站位乱", "群像失控"]
+    },
+    "36": {
+      "group": "shot",
+      "priority": 4,
+      "tags": ["分格分镜", "镜头拆分", "漫画感"],
+      "triggers": ["漫剧分镜", "分格", "镜头拆解"],
+      "stages": ["script", "shot", "ref_image"]
+    },
+    "37": {
+      "group": "shot",
+      "priority": 4,
+      "tags": ["转场", "过渡", "镜头连接"],
+      "triggers": ["转场", "切镜", "过渡", "承上启下"],
+      "stages": ["script", "shot", "repair"],
+      "negative_rules": ["转场硬", "切换突兀"]
+    },
+    "38": {
+      "group": "specialized",
+      "priority": 4,
+      "tags": ["时空恒定", "连续性", "场景逻辑"],
+      "triggers": ["前后连贯", "时空一致", "跨场景衔接"],
+      "stages": ["script", "shot", "repair"],
+      "negative_rules": ["时空跳", "逻辑断"]
+    },
+    "39": {
+      "group": "specialized",
+      "priority": 3,
+      "tags": ["季节", "天气", "前后呼应"],
+      "triggers": ["下雪", "下雨", "季节统一", "天气连贯"],
+      "stages": ["script", "shot", "ref_image", "repair"]
+    },
+    "40": {
+      "group": "specialized",
+      "priority": 4,
+      "tags": ["节奏", "单集结构", "推进"],
+      "triggers": ["节奏快", "推进感", "短剧节奏", "节奏把控"],
+      "stages": ["script", "repair"]
+    },
+    "41": {
+      "group": "specialized",
+      "priority": 4,
+      "tags": ["伏笔", "回收", "呼应", "结构"],
+      "triggers": ["伏笔", "前后呼应", "埋线", "回收"],
+      "stages": ["script", "repair"]
+    },
+    "42": {
+      "group": "dialogue",
+      "priority": 2,
+      "tags": ["字幕", "版式", "阅读节奏"],
+      "triggers": ["字幕排版", "字幕阅读", "字卡"],
+      "stages": ["shot", "repair"]
+    },
+    "43": {
+      "group": "character",
+      "priority": 5,
+      "tags": ["防畸变", "防崩坏", "人物稳定", "面部修正"],
+      "triggers": ["人物不稳", "五官崩", "脸崩", "畸变"],
+      "stages": ["shot", "ref_image", "repair"],
+      "negative_rules": ["脸崩", "畸变", "手变形"]
+    },
+    "44": {
+      "group": "shot",
+      "priority": 5,
+      "tags": ["帧间连贯", "时序稳定", "画面连续"],
+      "triggers": ["连贯", "时序", "镜头衔接", "动作连续"],
+      "stages": ["shot", "repair"],
+      "negative_rules": ["帧跳", "动作断", "画面抖"]
+    },
+    "45": {
+      "group": "shot",
+      "priority": 3,
+      "tags": ["画幅", "横竖屏", "构图适配"],
+      "triggers": ["竖屏", "横屏", "9:16", "16:9"],
+      "stages": ["shot", "ref_image", "repair"]
+    },
+    "46": {
+      "group": "specialized",
+      "priority": 3,
+      "tags": ["背景音乐", "情绪氛围", "节奏"],
+      "triggers": ["BGM", "背景音乐", "音乐氛围"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "47": {
+      "group": "specialized",
+      "priority": 3,
+      "tags": ["音效", "环境声", "沉浸感"],
+      "triggers": ["音效", "环境声", "氛围声"],
+      "stages": ["shot", "repair"]
+    },
+    "48": {
+      "group": "specialized",
+      "priority": 4,
+      "tags": ["合规", "尺度", "平台安全"],
+      "triggers": ["过审", "合规", "尺度", "平台规范"],
+      "stages": ["script", "shot", "repair"],
+      "negative_rules": ["违规", "擦边", "过界"]
+    },
+    "49": {
+      "group": "shot",
+      "priority": 5,
+      "tags": ["影视运镜", "镜头语言", "运动设计"],
+      "triggers": ["推拉摇移", "跟拍", "镜头语言", "电影运镜"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "50": {
+      "group": "style",
+      "priority": 4,
+      "tags": ["TVC", "广告片", "商业质感", "品牌表达"],
+      "triggers": ["广告", "TVC", "商业片", "品牌感"],
+      "stages": ["script", "shot", "ref_image", "repair"]
+    },
+    "90": {
+      "group": "dialogue",
+      "priority": 5,
+      "tags": ["人设台词", "说话风格", "角色声音"],
+      "triggers": ["符合人设", "说话口吻", "角色台词风格"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "91": {
+      "group": "dialogue",
+      "priority": 5,
+      "tags": ["情绪台词", "场景台词", "对白氛围"],
+      "triggers": ["情绪对白", "场景台词", "此情此景怎么说"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "92": {
+      "group": "dialogue",
+      "priority": 5,
+      "tags": ["潜台词", "言外之意", "分寸感"],
+      "triggers": ["潜台词", "留白", "言外之意", "话里有话"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "93": {
+      "group": "dialogue",
+      "priority": 4,
+      "tags": ["清醒台词", "狠人表达", "格局感"],
+      "triggers": ["清醒表达", "狠话", "不卑不亢", "格局台词"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "94": {
+      "group": "dialogue",
+      "priority": 4,
+      "tags": ["反派台词", "侧写", "压迫感"],
+      "triggers": ["反派", "威压", "反派独白", "危险感"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "95": {
+      "group": "dialogue",
+      "priority": 5,
+      "tags": ["冲突对白", "对峙", "拉扯", "高能台词"],
+      "triggers": ["对峙", "吵架", "摊牌", "冲突戏", "高能对白"],
+      "stages": ["script", "shot", "repair"],
+      "negative_rules": ["对白软", "不够冲", "缺火花"]
+    },
+    "96": {
+      "group": "dialogue",
+      "priority": 5,
+      "tags": ["家国", "国运", "责任", "格局"],
+      "triggers": ["护国", "家国安危", "国运", "责任担当", "能力越大责任越大"],
+      "stages": ["script", "shot", "repair"]
+    },
+    "97": {
+      "group": "shot",
+      "priority": 6,
+      "tags": ["运镜底层", "镜头表达", "焦段光学", "构图留白", "光影情绪", "剪辑节奏"],
+      "triggers": ["运镜方案", "镜头设计", "焦段选择", "构图留白", "光影氛围", "剪辑节奏", "电影感", "短剧分镜"],
+      "stages": ["script", "shot", "ref_image", "repair"],
+      "negative_rules": ["无目的乱动", "启停生硬", "双重心打架", "焦段与幅度不匹配", "猛推猛拉", "连续同景别"]
+    }
+  }
+}

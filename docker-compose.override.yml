@@ -1,0 +1,51 @@
+services:
+  init-storage:
+    image: saas--api:latest
+    user: "0:0"
+    volumes:
+      - ./storage:/app/storage
+    entrypoint: ["sh", "-lc"]
+    command:
+      - "mkdir -p /app/storage/projects /app/storage/ltx_downloads /app/storage/final_videos /app/storage/video_production /app/storage/director_runs /app/storage/director_evolution && chmod -R a+rwX /app/storage/projects /app/storage/ltx_downloads /app/storage/final_videos /app/storage/video_production /app/storage/director_runs /app/storage/director_evolution"
+    restart: "no"
+  migrate:
+    entrypoint: ["echo", "skipped"]
+    command: []
+    restart: "no"
+  api:
+    depends_on:
+      init-storage:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+      - ./monitoring:/app/monitoring
+      - ./alembic:/app/alembic
+      - ./storage:/app/storage
+  worker-image:
+    depends_on:
+      init-storage:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage
+  worker-video:
+    depends_on:
+      init-storage:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage
+  worker-text:
+    depends_on:
+      init-storage:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage
+  worker-admin:
+    depends_on:
+      init-storage:
+        condition: service_completed_successfully
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage

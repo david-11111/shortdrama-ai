@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-16",
+  "items": [
+    {
+      "id": "dehaze_clarity_boost",
+      "name": "去雾通透增强",
+      "category": "visual_enhancement",
+      "source_type": "creator_tutorial",
+      "difficulty": "easy",
+      "commercial_value": "medium",
+      "good_for_mvp": true,
+      "ffmpeg_feasibility": "executable_approximation",
+      "needs_ai": [],
+      "needs_assets": ["black_solid_layer"],
+      "summary": "通过滤色、柔光、对比度和锐化模拟通透去雾效果。它不是 480p 到 1080p/4K 的超分辨率。",
+      "steps": [
+        "导入视频，复制主轨视频。",
+        "复制素材切为画中画，与主轨完全对齐。",
+        "画中画图层混合模式设为滤色。",
+        "新增黑底画中画素材，放大铺满全屏。",
+        "黑底图层混合模式设为柔光。",
+        "微调对比度 +20、锐化 +30、去雾 +10。"
+      ],
+      "ffmpeg_plan": [
+        "split main video into base and duplicate streams",
+        "blend duplicate with base using screen blend",
+        "apply softlight-like contrast layer approximation",
+        "apply eq contrast and unsharp filters"
+      ],
+      "default_params": {
+        "screen_opacity": 0.35,
+        "contrast": 1.2,
+        "sharpness": 0.8,
+        "dehaze_strength": 0.1
+      },
+      "user_controls": [
+        {"key": "strength", "label": "增强强度", "type": "select", "options": ["soft", "balanced", "strong"], "default": "balanced"},
+        {"key": "sharpness", "label": "锐化", "type": "number", "default": 30, "min": 0, "max": 60}
+      ]
+    },
+    {
+      "id": "year_countdown_reveal",
+      "name": "年份数字闪切揭示",
+      "category": "text_reveal",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "medium",
+      "good_for_mvp": true,
+      "ffmpeg_feasibility": "executable",
+      "needs_ai": [],
+      "needs_assets": [],
+      "summary": "先制作黑底大数字闪切素材，再用正片叠底混合到视频上，并通过放大关键帧露出原视频。",
+      "steps": [
+        "导入黑底素材，新建文本输入当前年份。",
+        "把文字放大，持续约 5 秒。",
+        "每隔 5 帧分割文本，从当前年份向前递减修改数字。",
+        "导出数字闪切素材。",
+        "新项目导入主视频，把数字素材作为画中画全屏覆盖。",
+        "混合模式选择正片叠底。",
+        "在 4 秒位置打关键帧，到结尾放大数字素材，直到视频完全露出。"
+      ],
+      "default_params": {
+        "start_year": 2025,
+        "frame_step": 5,
+        "overlay_blend": "multiply",
+        "reveal_start_sec": 4
+      },
+      "user_controls": [
+        {"key": "start_year", "label": "起始年份", "type": "number", "default": 2025},
+        {"key": "frame_step", "label": "数字间隔帧数", "type": "number", "default": 5, "min": 2, "max": 12}
+      ]
+    },
+    {
+      "id": "music_player_overlay",
+      "name": "音乐播放器效果",
+      "category": "motion_graphics",
+      "source_type": "creator_tutorial",
+      "difficulty": "medium",
+      "commercial_value": "medium",
+      "good_for_mvp": true,
+      "ffmpeg_feasibility": "executable_with_generated_shapes",
+      "needs_ai": [],
+      "needs_assets": ["licensed_bgm_optional"],
+      "summary": "用圆形蒙版、黑色外壳、白色唱片、播放按钮、进度条和旋转动画模拟音乐播放器。",
+      "steps": [
+        "导入视频作为背景，并调整到目标时长。",
+        "新增黑色纯色画中画，圆形蒙版，羽化 5 到 8，居中模拟播放器外壳。",
+        "新增白色圆形图片，缩小放到黑色圆形内部作为唱片圆盘。",
+        "添加播放按钮、音乐符号、进度条等贴纸并调整位置。",
+        "给白色圆盘添加 3 到 5 秒顺时针循环旋转动画。",
+        "给进度条添加线性向右滑动动画，时长与视频一致。",
+        "导入或提取音乐，与视频对齐。",
+        "最后微调亮度和对比度各 +10。"
+      ],
+      "default_params": {
+        "shell_radius_ratio": 0.28,
+        "disc_radius_ratio": 0.2,
+        "rotation_loop_sec": 4,
+        "brightness": 0.03,
+        "contrast": 1.1
+      },
+      "user_controls": [
+        {"key": "disc_position", "label": "播放器位置", "type": "select", "options": ["center", "lower"], "default": "center"},
+        {"key": "rotation_loop_sec", "label": "唱片旋转周期", "type": "number", "default": 4, "min": 3, "max": 5}
+      ]
+    },
+    {
+      "id": "freeze_cutout_emphasis",
+      "name": "人物定格描边效果",
+      "category": "subject_emphasis",
+      "source_type": "creator_tutorial",
+      "difficulty": "advanced",
+      "commercial_value": "high",
+      "good_for_mvp": false,
+      "ffmpeg_feasibility": "needs_ai_segmentation",
+      "needs_ai": ["best_frame_selection", "person_segmentation"],
+      "needs_assets": ["brush_sticker", "sword_sfx", "typewriter_sfx"],
+      "summary": "在人物最好看的位置定格，抠出人物做描边和位移动画，背景模糊，加贴纸、打字机文字和音效。",
+      "steps": [
+        "在人物最好看的位置点击定格，生成 3 秒定格画面。",
+        "删除后面多余视频，复制定格画面一份。",
+        "把复制层切换到画中画，并与主轨定格画面对齐。",
+        "对画中画做自定义抠像，把人物抠出来。",
+        "给抠像人物添加单层描边。",
+        "给主轨定格画面添加模糊特效。",
+        "在画中画开头打关键帧，稍后把人物向左移动并略微放大。",
+        "添加笔刷贴纸，放到右侧，并把层级放在画中画后面。",
+        "给贴纸添加向右滑动入场动画。",
+        "添加文字，设置颜色和字体，并添加打字机入场动画。",
+        "添加刀剑出鞘音效和打字声音效。"
+      ],
+      "default_params": {
+        "freeze_duration_sec": 3,
+        "background_blur": 12,
+        "outline_width": 6,
+        "subject_scale_to": 1.08,
+        "subject_move_x_ratio": -0.12
+      },
+      "user_controls": [
+        {"key": "freeze_duration_sec", "label": "定格时长", "type": "number", "default": 3, "min": 2, "max": 5},
+        {"key": "outline_style", "label": "描边风格", "type": "select", "options": ["single", "bold"], "default": "single"}
+      ]
+    }
+  ]
+}

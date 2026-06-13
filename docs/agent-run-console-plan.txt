@@ -1,0 +1,921 @@
+# Agent Run Console 方案
+
+最后更新：2026-05-19
+
+## 1. 共识结论
+
+当前项目已经具备大量有价值的后台能力，包括项目大脑、详细流程账本、原始读取清单、生产队列、视觉资产规划、参考图链路、素材池、分镜卡片、Agent 日志、成本风控、成片验收和 FFmpeg 导出链路。
+
+问题不是功能不够，而是这些能力现在按后台模块散落在 `director/produce` 页面里，用户无法像 Codex/Claude 那样看到“一次制作 run 正在被 Agent 执行”。
+
+新的方向：
+
+- 旧 `director/produce` 页面原封不动保留，定位为后台专家控制台。
+- 新建 `/director/agent-run/:runId`，定位为用户侧 Agent 执行客户端。
+- 新页面不替代旧后台，而是通过服务端聚合接口调用旧后台能力的数据与证据。
+- `run_id` 是主线。一次制作过程中的 task、event、artifact、ledger、interrupt 都必须归属到同一个 run。
+- 服务端负责用户、项目、run、task、artifact 的权限隔离，客户端只展示当前用户有权限看到的当前 run。
+
+## 2. 产品定位
+
+### 2.1 旧 Produce 页面
+
+定位：后台专家控制台。
+
+用途：
+
+- 查看完整项目状态。
+- 调试大脑、账本、分镜、资产、任务、日志。
+- 手动补资产、重出图、重出视频、调整分镜。
+- 专家排障、人工接管、运营/开发验证。
+
+原则：
+
+- 不拆除。
+- 不强行重构成 Codex 界面。
+- 不再继续堆成用户主界面。
+- 作为 Agent Run Console 的证据与接管后台。
+
+### 2.2 新 Agent Run Console
+
+定位：用户侧执行客户端。
+
+用途：
+
+- 观看一次视频制作 run。
+- 像 Codex/Claude 一样看到 Agent 正在做什么。
+- 自动滚动到当前执行步骤。
+- 看到失败原因、已有产物、退款状态和下一步选择。
+- 必要时进入旧后台做专家级操作。
+
+核心体验：
+
+```text
+用户点击开始制作
+  -> 进入 /director/agent-run/:runId
+  -> 页面显示当前目标和制作流程
+  -> 主线自动滚动到当前执行点
+  -> 失败时停在失败节点
+  -> 给出可接管动作
+```
+
+## 3. 信息分层
+
+现有功能不是重复，而是不同层级的信息。
+
+### 3.1 主线摘要层：制片流式终端
+
+给人看的主线。
+
+显示：
+
+- Agent 当前正在做什么。
+- 已经完成什么。
+- 当前卡在哪里。
+- 下一步准备做什么。
+
+示例：
+
+```text
+工作空间：已读取项目工作区，8/8 文件就绪
+大脑：项目理解完成，进入第 1 集第 1 场
+资产：3 个分镜缺角色/场景/风格参考
+关键帧：Seedream 已完成 3/3
+视频：Seedance 完成 1/3，2 个失败
+阻断：Seedance key 池饱和，已退款 160 积分
+```
+
+### 3.2 状态账本层
+
+回答：现在项目是什么状态？
+
+包括：
+
+- 目标总长。
+- 已生成时长。
+- 当前第几集第几场。
+- 已完成镜头数。
+- 缺失镜头数。
+- 资产锁定情况。
+- 成本、风控、验收状态。
+
+### 3.3 大脑轨迹层
+
+回答：大脑这次走了哪些步骤？
+
+包括：
+
+- 读取上下文。
+- 合并记忆与账本。
+- 映射创作技巧。
+- 检查剧情承接。
+- 成本与风控。
+- 成片可交付检查。
+- 发布执行指令。
+- 回写与复盘。
+
+### 3.4 详细流程账本层
+
+回答：大脑为什么这么判断？
+
+每一步至少包含：
+
+- 输入依据。
+- 判断逻辑。
+- 产物/调用。
+- 停止条件。
+
+它是“大脑轨迹”和“Agent 日志”之间的解释层。
+
+### 3.5 原始读取清单层
+
+回答：大脑到底读了什么？
+
+包括：
+
+- `PROJECT.md`
+- `story/characters.md`
+- `story/episodes.md`
+- 当前场景文件
+- 分镜 JSON
+- `memory/decisions.md`
+- `memory/failures.md`
+- `memory/constraints.md`
+
+每项要说明：
+
+- 是否读取。
+- 文件大小。
+- 用于什么判断。
+- 缺失会造成什么影响。
+
+### 3.6 Agent 日志层
+
+回答：系统实际执行了什么？
+
+包括：
+
+- API 调用。
+- 队列派发。
+- worker 阶段。
+- provider 请求。
+- provider 返回。
+- 写回字段。
+- 退款。
+- FFmpeg 阶段。
+- 错误详情。
+
+原则：
+
+- 必须细。
+- 必须持久化。
+- 必须能审计。
+- 但不默认铺在主界面上。
+
+### 3.7 资产与接管层
+
+包括：
+
+- 视觉资产规划。
+- 参考图链路画布。
+- 素材池。
+- 分镜卡片。
+
+定位：
+
+- 正常情况下作为流程节点的证据。
+- 出问题时作为人工接管工具。
+
+## 4. 最终页面结构
+
+路径：
+
+```text
+/director/agent-run/:runId
+```
+
+### 4.1 顶部 Run Header
+
+显示：
+
+- run 目标。
+- 项目名。
+- project_id。
+- run_id。
+- run 状态。
+- 当前阶段。
+- 模式：preview / step / autopilot。
+- 预算。
+- 已预扣。
+- 已消耗。
+- 已退款。
+- provider 状态。
+
+目标：
+
+用户一眼知道“这次制作在干什么、做到哪里、是否有问题”。
+
+### 4.2 主区 Run Timeline
+
+主区不是原始日志，而是制作流程节点。
+
+标准节点：
+
+```text
+1. 读取上下文
+2. 合并记忆与账本
+3. 规划剧情/分镜
+4. 锁定视觉资产
+5. 生成关键帧
+6. 生成视频
+7. 配音/BGM/字幕
+8. FFmpeg 剪辑导出
+9. 成片质检
+10. 回写复盘
+```
+
+每个节点显示：
+
+- 状态：pending / running / completed / blocked / failed / skipped。
+- 进度摘要。
+- 大脑判断摘要。
+- 工具执行摘要。
+- 产物缩略图或链接。
+- 风险。
+- 下一步动作。
+
+交互：
+
+- 新事件到达时，页面自动滚动到当前节点。
+- 如果用户手动点击历史节点，短时间暂停自动滚动。
+- 出现 failed/blocked/risk 时，主区停在问题节点。
+
+### 4.3 右侧 Evidence Drawer
+
+点击任一节点或主线消息，右侧显示证据。
+
+内容分 tab：
+
+```text
+状态账本
+大脑判断
+详细流程
+原始读取
+工具证据
+产物
+原始事件
+后台链接
+```
+
+示例：生成视频节点。
+
+```text
+状态账本：
+  视频 1/3 完成，2 个失败
+
+大脑判断：
+  3 个镜头都有 selected_image，需要生成 selected_video
+
+详细流程：
+  输入依据：shot_rows selected_image 3/3
+  判断逻辑：缺 selected_video，进入 Seedance
+  停止条件：provider 饱和
+
+工具证据：
+  task A done，写回 shot 1 selected_video
+  task B dead_letter，已退款 80
+  task C dead_letter，已退款 80
+
+原始事件：
+  查看 18 条 agent_events
+
+后台链接：
+  打开旧 produce 的分镜卡片/Agent 日志/视觉资产规划
+```
+
+### 4.4 底部 Control Dock
+
+失败或等待时显示可执行动作。
+
+第一版可以先显示按钮，逐步接真动作。
+
+动作：
+
+- 重试失败视频。
+- 只剪已有素材。
+- 换 provider。
+- 等待 key 后继续。
+- 继续一步。
+- 暂停 run。
+- 取消 run。
+- 打开后台专家控制台。
+
+原则：
+
+- 按钮不能长期停留在摆设状态。
+- 每个按钮必须对应后端 action 或明确标记为“待实现”。
+
+## 5. 后端设计
+
+### 5.1 新路由
+
+建议新建：
+
+```text
+app/routes/agent_runs.py
+```
+
+接口：
+
+```text
+GET  /api/agent-runs/{run_id}/snapshot
+GET  /api/agent-runs/{run_id}/events
+POST /api/agent-runs/{run_id}/actions/retry-failed
+POST /api/agent-runs/{run_id}/actions/export-partial
+POST /api/agent-runs/{run_id}/actions/change-provider
+POST /api/agent-runs/{run_id}/actions/continue-step
+POST /api/agent-runs/{run_id}/actions/cancel
+```
+
+第一阶段至少实现：
+
+```text
+GET /api/agent-runs/{run_id}/snapshot
+```
+
+### 5.2 权限隔离
+
+所有 run 级接口必须校验：
+
+```text
+agent_runs.id = run_id
+agent_runs.user_id = current_user.id
+```
+
+或者：
+
+```text
+agent_runs.project_id 属于 current_user
+```
+
+返回数据只能包含：
+
+- 当前 run。
+- 当前 run 所属 project。
+- 当前 run 关联 tasks。
+- 当前 run 关联 events。
+- 当前 run 关联 artifacts。
+- 当前用户有权限访问的旧后台数据。
+
+客户端不负责隔离，服务端负责隔离。
+
+### 5.3 Snapshot 聚合服务
+
+建议新增：
+
+```text
+app/services/agent_run_snapshot.py
+```
+
+职责：
+
+- 读取 `agent_runs`。
+- 读取 `projects`。
+- 读取 `video_production_runs`。
+- 读取 `agent_steps`。
+- 读取 `agent_events`。
+- 读取 `agent_artifacts`。
+- 读取 `tasks`。
+- 读取 `shot_rows`。
+- 读取 `final_edit_plans`。
+- 读取必要的 project brain / workspace / ledgers。
+- 归纳成前端可直接渲染的 run snapshot。
+
+### 5.4 Snapshot 数据结构
+
+建议结构：
+
+```json
+{
+  "run": {
+    "run_id": "",
+    "project_id": "",
+    "user_id": 0,
+    "goal": "",
+    "status": "",
+    "current_phase": "",
+    "mode": "",
+    "started_at": "",
+    "ended_at": null,
+    "summary": "",
+    "final_decision": ""
+  },
+  "project": {
+    "project_id": "",
+    "name": ""
+  },
+  "budget": {
+    "estimated_max_credits": 0,
+    "allowed_max_credits": 0,
+    "reserved_credits": 0,
+    "spent_credits": 0,
+    "refunded_credits": 0,
+    "remaining_run_budget": 0
+  },
+  "ledger": {
+    "target_duration_sec": 0,
+    "generated_duration_sec": 0,
+    "approved_duration_sec": 0,
+    "current_episode": 1,
+    "current_scene": 1,
+    "completed_scenes": [],
+    "locked_assets": {},
+    "open_risks": []
+  },
+  "nodes": [
+    {
+      "id": "generate_videos",
+      "title": "生成视频",
+      "status": "failed",
+      "summary": "视频 1/3 完成，2 个失败",
+      "brain_summary": "3 个镜头都有 selected_image，缺 selected_video",
+      "evidence_summary": "Seedance 成功 1 个，失败 2 个",
+      "progress": 33,
+      "risks": [],
+      "artifacts": [],
+      "event_ids": [],
+      "task_ids": [],
+      "available_actions": ["retry_failed", "export_partial", "change_provider"]
+    }
+  ],
+  "stream": [
+    {
+      "id": "",
+      "node_id": "generate_videos",
+      "time": "",
+      "level": "error",
+      "text": "Seedance 完成 1/3，2 个失败，原因：key 池饱和"
+    }
+  ],
+  "evidence": {
+    "generate_videos": {
+      "state_ledger": {},
+      "brain_trace": [],
+      "detailed_flow": [],
+      "raw_reads": [],
+      "tool_events": [],
+      "tasks": [],
+      "artifacts": [],
+      "backend_links": []
+    }
+  },
+  "actions": [
+    {
+      "id": "retry_failed",
+      "label": "重试失败视频",
+      "enabled": true,
+      "reason": ""
+    }
+  ]
+}
+```
+
+## 6. 前端设计
+
+### 6.1 新目录
+
+```text
+frontend/src/pages/director/agent-run/
+  index.vue
+  components/
+    RunHeader.vue
+    RunTimeline.vue
+    RunNode.vue
+    StreamTerminal.vue
+    EvidenceDrawer.vue
+    ControlDock.vue
+    LedgerSummary.vue
+    ArtifactStrip.vue
+  composables/
+    useAgentRunSnapshot.ts
+    useRunAutoScroll.ts
+    useRunEvidence.ts
+```
+
+### 6.2 路由
+
+新增：
+
+```text
+/director/agent-run/:runId
+```
+
+旧页面保持：
+
+```text
+/director/produce
+/director/produce/:projectId
+```
+
+### 6.3 页面布局
+
+```text
+┌──────────────────────────────────────────────┐
+│ RunHeader                                    │
+├──────────────────────────────┬───────────────┤
+│ StreamTerminal / Timeline    │ EvidenceDrawer│
+│ 自动滚动到当前节点             │ 点击节点展示证据 │
+├──────────────────────────────┴───────────────┤
+│ ControlDock                                  │
+└──────────────────────────────────────────────┘
+```
+
+### 6.4 自动滚动原则
+
+- 默认跟随最新 active node。
+- 新事件到达后滚动到当前节点。
+- 用户手动点击历史节点后暂停自动跟随 10-20 秒。
+- 出现 failed/blocked/risk 时固定到问题节点。
+- 提供“回到当前执行点”按钮。
+
+### 6.5 旧后台入口
+
+新页面要提供明确入口：
+
+```text
+打开专家后台
+打开分镜卡片
+打开视觉资产规划
+打开 Agent 原始日志
+打开参考图链路
+打开剪辑台
+```
+
+这些入口可以先跳转到旧 `produce` 页面，再逐步支持锚点定位。
+
+## 7. Run 与后台能力的映射
+
+### 7.1 读取上下文节点
+
+使用旧功能：
+
+- 原始读取清单。
+- 工作区文件。
+- project brain read files。
+
+展示：
+
+- 文件 8/8 就绪。
+- 哪些文件 covered / partial / missing。
+- 缺失影响。
+
+### 7.2 合并记忆与账本节点
+
+使用旧功能：
+
+- 进度账本。
+- 角色/场景/资产锁定。
+- failures / decisions / constraints。
+
+展示：
+
+- 当前第几集第几场。
+- 已生成多少秒。
+- 已失败哪些任务。
+- 下一场承接状态。
+
+### 7.3 映射创作技巧节点
+
+使用旧功能：
+
+- 创作技巧账本。
+- prompt library。
+- visual quality rules。
+- edit strategy。
+
+展示：
+
+- 哪些技巧已下沉。
+- 哪些技巧只停留在候选。
+- 哪些技巧因为缺素材无法执行。
+
+### 7.4 锁定视觉资产节点
+
+使用旧功能：
+
+- 视觉资产规划。
+- 参考图链路画布。
+- 素材池。
+
+展示：
+
+- 角色/场景/道具/服装/风格参考是否齐。
+- 母图与分镜绑定关系。
+- 断链、重复生成、未复用风险。
+
+### 7.5 生成关键帧节点
+
+使用旧功能：
+
+- image task。
+- Seedream provider events。
+- selected_image 写回。
+
+展示：
+
+- 关键帧完成数。
+- 失败数。
+- 写回字段。
+- 图片缩略图。
+
+### 7.6 生成视频节点
+
+使用旧功能：
+
+- video task。
+- Seedance/Kling provider events。
+- selected_video 写回。
+- refund records。
+
+展示：
+
+- 视频完成数。
+- 失败数。
+- provider 饱和/策略拒绝/下载失败等归因。
+- 已退款积分。
+- 可重试镜头。
+
+### 7.7 配音/BGM/字幕节点
+
+使用旧功能：
+
+- TTS task。
+- BGM plan。
+- subtitles plan。
+- final edit plan。
+
+展示：
+
+- 台词是否拆分。
+- 配音是否生成。
+- BGM 是否存在。
+- 字幕是否齐。
+
+### 7.8 FFmpeg 剪辑导出节点
+
+使用旧功能：
+
+- final edit plan。
+- FFmpeg events。
+- final_video artifact。
+
+展示：
+
+- validate plan。
+- normalize clips。
+- concat。
+- mix audio。
+- burn subtitles。
+- export mp4。
+- probe output。
+
+### 7.9 成片质检节点
+
+使用旧功能：
+
+- final delivery report。
+- post generation review。
+- quality ledgers。
+
+展示：
+
+- 是否有视频轨。
+- 是否有音频轨。
+- 时长是否达标。
+- 字幕是否齐。
+- 质量评分。
+- 是否可交付。
+
+## 8. 失败与接管
+
+### 8.1 失败必须变成主线节点
+
+错误不应该只留在日志里。
+
+示例：
+
+```text
+生成视频失败：Seedance key 池饱和
+已完成：1/3 视频
+失败：2/3 视频
+已退款：160 积分
+影响：不能完整成片
+下一步：重试失败视频 / 等待 key / 换 provider / 只剪已有素材
+```
+
+### 8.2 接管动作
+
+第一批动作：
+
+- `retry_failed_videos`
+- `export_partial`
+- `change_provider`
+- `continue_step`
+- `cancel_run`
+- `open_expert_console`
+
+第二批动作：
+
+- `approve_risky_dispatch`
+- `override_budget`
+- `reject_artifact`
+- `lock_asset`
+- `replace_asset`
+- `regenerate_shot`
+
+## 9. 多用户与隔离
+
+### 9.1 数据归属
+
+所有核心数据必须有归属：
+
+- `user_id`
+- `project_id`
+- `run_id`
+- `task_id`
+
+### 9.2 服务端校验
+
+所有新接口必须服务端校验权限。
+
+客户端传入 `run_id` 后，服务端必须验证：
+
+```text
+agent_runs.id = run_id
+agent_runs.user_id = current_user.id
+```
+
+或者验证：
+
+```text
+agent_runs.project_id 属于 current_user
+```
+
+### 9.3 WebSocket
+
+当前可继续使用 project 级订阅。
+
+后续应增加 run 级订阅：
+
+```text
+subscribe_run(run_id)
+unsubscribe_run(run_id)
+```
+
+这样一个项目多个 run 并行时不会串线。
+
+## 10. 实施路线
+
+### 阶段 1：Snapshot 与只读 Agent Run 页面
+
+目标：先让用户看得懂。
+
+后端：
+
+- 新增 `app/services/agent_run_snapshot.py`。
+- 新增 `GET /api/agent-runs/{run_id}/snapshot`。
+- 聚合 run、project、events、tasks、artifacts、ledger、shot_rows。
+- 归纳出 nodes、stream、evidence、actions。
+- snapshot 不返回无限日志：events/tasks/artifacts/evidence/stream 都必须有默认上限，并在 `meta.truncated` 中标记是否被裁剪。
+- 完整日志通过 `/api/agent-runs/{run_id}/events` 或后续分页 evidence 接口按需读取。
+
+前端：
+
+- 新增 `/director/agent-run/:runId`。
+- 新增 RunHeader。
+- 新增 StreamTerminal。
+- 新增 RunTimeline。
+- 新增 EvidenceDrawer。
+- 新增自动滚动。
+
+验收：
+
+- 打开 run 页面只显示当前 run。
+- 不混旧项目状态。
+- 实时事件即使来自 project 级 WebSocket，也必须按当前 `run_id` 过滤。
+- 能看到真实 Seedream/Seedance/FFmpeg 过程。
+- 失败会停在失败节点。
+- 点击节点能看到证据。
+
+### 阶段 2：旧后台入口与生产启动跳转
+
+目标：新旧页面形成稳定关系。
+
+工作：
+
+- `production/start` 返回 `agent_run_url`。
+- 旧 produce 页面开始制作后跳转到新 run 页面。
+- 新 run 页面提供“打开专家后台”。
+- 后台链接携带 project_id 和 run_id。
+
+验收：
+
+- 用户从开始制作直接进入 Agent Run Console。
+- 旧后台仍可打开。
+- 后台用于排障，不再作为主观看界面。
+
+### 阶段 3：失败归因与退款展示
+
+目标：商业化可解释。
+
+工作：
+
+- provider 错误归类：
+  - key 池饱和。
+  - policy violation。
+  - timeout。
+  - download failed。
+  - writeback failed。
+  - ffmpeg failed。
+- 聚合退款流水。
+- 在视频节点显示已退款、未退款、已扣费。
+
+验收：
+
+- Seedance 饱和时页面直接显示原因、影响范围、退款状态。
+- 不需要查数据库才能知道是否亏损。
+
+### 阶段 4：接管动作
+
+目标：失败后能处理。
+
+工作：
+
+- 重试失败视频。
+- 只剪已有素材。
+- 取消 run。
+- 继续一步。
+- 换 provider。
+
+验收：
+
+- Seedance 失败后可以点击重试失败镜头。
+- 可以选择只剪已有素材导出 partial preview。
+- 取消 run 后不会继续烧积分。
+
+### 阶段 5：Run 级 WebSocket 与并发隔离
+
+目标：多项目、多 run 不串线。
+
+工作：
+
+- 后端支持 run 级订阅。
+- 前端只订阅当前 run。
+- 多项目并发压测。
+
+验收：
+
+- 用户 A 看不到用户 B 的 run。
+- 同项目多个 run 不混事件。
+- 页面刷新后能恢复当前 run。
+
+## 11. 验收标准
+
+第一版必须满足：
+
+1. `/director/agent-run/:runId` 可以打开。
+2. 服务端校验当前用户有权访问 run。
+3. 页面只展示当前 run。
+4. 有 Run Header。
+5. 有主线 StreamTerminal。
+6. 有流程节点。
+7. 新事件到达后自动滚到当前节点。
+8. failed/blocked/risk 会被提升到主线。
+9. 点击节点能打开 Evidence Drawer。
+10. Evidence Drawer 能看到大脑判断、工具证据、任务、产物。
+11. 有旧后台入口。
+12. `npm run build` 通过。
+13. 后端 py_compile 通过。
+14. 至少用一个真实失败 run 验证：Seedance 饱和能被归因为可读问题。
+
+商业化后续验收：
+
+1. 多用户隔离。
+2. 多 run 不串线。
+3. 退款状态准确。
+4. 接管动作真实可执行。
+5. 页面刷新可恢复。
+6. 压测不崩溃。
+
+## 12. 关键原则
+
+1. 旧后台保留，不破坏已有能力。
+2. 新页面是客户端，不是后台大杂烩。
+3. run 是主线，project 是容器。
+4. 服务端负责隔离，客户端不承担权限边界。
+5. 细日志必须保存，但主界面只显示归纳后的流程。
+6. 失败必须进入主线，不藏在日志里。
+7. 接管动作必须逐步做成真动作。
+8. 页面要像有人在工作，做到哪里就滚到哪里。
+9. 功能模块不是删除，而是归位到对应流程节点的证据或工具。
+10. 先做看得懂，再做能接管，再做自动恢复。

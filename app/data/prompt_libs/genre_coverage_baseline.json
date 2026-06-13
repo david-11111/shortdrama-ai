@@ -1,0 +1,274 @@
+{
+  "version": "1.0",
+  "description": "??????????????",
+  "genres": [
+    {
+      "key": "urban_romance",
+      "name": "????",
+      "aliases": [
+        "??",
+        "????",
+        "????",
+        "????"
+      ]
+    },
+    {
+      "key": "sweet_romance",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "tragic_romance",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "?????",
+        "????"
+      ]
+    },
+    {
+      "key": "domineering_ceo",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "????"
+      ]
+    },
+    {
+      "key": "marriage_first",
+      "name": "????",
+      "aliases": [
+        "????",
+        "??",
+        "????",
+        "??"
+      ]
+    },
+    {
+      "key": "substitute_love",
+      "name": "????",
+      "aliases": [
+        "??",
+        "???",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "revenge_counterattack",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "????"
+      ]
+    },
+    {
+      "key": "rebirth",
+      "name": "??",
+      "aliases": [
+        "??",
+        "????",
+        "????"
+      ]
+    },
+    {
+      "key": "time_travel",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "system_flow",
+      "name": "???",
+      "aliases": [
+        "??",
+        "???",
+        "???"
+      ]
+    },
+    {
+      "key": "ancient_romance",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "????",
+        "??"
+      ]
+    },
+    {
+      "key": "xianxia",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "wuxia",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "palace_intrigue",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "suspense",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "crime",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "fantasy",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "???",
+        "??"
+      ]
+    },
+    {
+      "key": "campus",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "workplace",
+      "name": "??",
+      "aliases": [
+        "??",
+        "???",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "family_ethics",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "mother_baby",
+      "name": "????",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "????"
+      ]
+    },
+    {
+      "key": "female_growth",
+      "name": "????",
+      "aliases": [
+        "????",
+        "???",
+        "??",
+        "????"
+      ]
+    },
+    {
+      "key": "male_growth",
+      "name": "????",
+      "aliases": [
+        "????",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "period_drama",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "???",
+        "????"
+      ]
+    },
+    {
+      "key": "rural",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    },
+    {
+      "key": "comedy",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "????",
+        "??"
+      ]
+    },
+    {
+      "key": "healing",
+      "name": "??",
+      "aliases": [
+        "??",
+        "??",
+        "??",
+        "??"
+      ]
+    }
+  ]
+}

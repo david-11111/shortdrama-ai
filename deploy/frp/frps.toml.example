@@ -1,0 +1,10 @@
+bindPort = 7000
+
+auth.method = "token"
+auth.token = "CHANGE_ME_STRONG_TOKEN"
+
+transport.tcpMux = true
+
+log.to = "frps.log"
+log.level = "info"
+log.maxDays = 7

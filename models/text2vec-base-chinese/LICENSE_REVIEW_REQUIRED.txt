@@ -1,0 +1,3 @@
+Commercial release requires a license and redistribution review for this local
+model package and any upstream model it derives from. Do not treat this marker
+as a license grant.

@@ -1,0 +1,34 @@
+groups:
+  - name: saas-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx error rate is above 5%"
+
+      - alert: QueueBacklog
+        expr: celery_queue_length > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task queue backlog growing"
+
+      - alert: QueueMetricsScrapeFailed
+        expr: celery_queue_scrape_error == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Queue length metrics cannot be scraped"
+
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API metrics endpoint is down"

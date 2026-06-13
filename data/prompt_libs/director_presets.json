@@ -1,0 +1,77 @@
+{
+  "version": "1.0",
+  "presets": [
+    {
+      "key": "full_library",
+      "name": "全库模式",
+      "description": "不加任何筛选，全量检索提示词库，适合探索和调试",
+      "filter_mode": "",
+      "filter_value": "",
+      "recommended_stage": [
+        "script",
+        "shot",
+        "ref_image"
+      ],
+      "goal": "全量"
+    },
+    {
+      "key": "core_engineering",
+      "name": "核心工程",
+      "description": "聚焦核心工程词库，强调镜头底层工程约束和技术精准度",
+      "filter_mode": "library_family",
+      "filter_value": "核心工程库",
+      "recommended_stage": [
+        "script",
+        "shot"
+      ],
+      "goal": "精准"
+    },
+    {
+      "key": "character_soul",
+      "name": "人物灵魂优先",
+      "description": "优先匹配人物情绪、眼神、神态、灵魂层面的提示词，适合人物驱动剧情",
+      "filter_mode": "parent_library",
+      "filter_value": "人物灵魂库群",
+      "recommended_stage": [
+        "shot",
+        "ref_image"
+      ],
+      "goal": "人物"
+    },
+    {
+      "key": "viral_shot",
+      "name": "爆款抓人",
+      "description": "优先匹配短视频爆款镜头、强钩子、高完播率相关提示词",
+      "filter_mode": "parent_library",
+      "filter_value": "镜头与拍法库群",
+      "recommended_stage": [
+        "shot"
+      ],
+      "goal": "爆款"
+    },
+    {
+      "key": "destiny_cinematic",
+      "name": "宿命电影感",
+      "description": "全库检索，偏重宿命感、电影感、压抑隐忍、情绪留白类提示词",
+      "filter_mode": "",
+      "filter_value": "",
+      "recommended_stage": [
+        "script",
+        "shot",
+        "ref_image"
+      ],
+      "goal": "电影感"
+    },
+    {
+      "key": "single_lib_debug",
+      "name": "单库调试",
+      "description": "指定 source_file 筛选值后只检索单个来源文件，用于调试特定库的效果",
+      "filter_mode": "source_file",
+      "filter_value": "",
+      "recommended_stage": [
+        "shot"
+      ],
+      "goal": "调试"
+    }
+  ]
+}

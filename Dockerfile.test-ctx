@@ -1,0 +1,3 @@
+FROM alpine
+COPY . /ctx/
+RUN ls -la /ctx/ && ls -la /ctx/frontend/ && echo '--- frontend files ---' && ls /ctx/frontend/ | head -10

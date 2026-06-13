@@ -1,0 +1,14 @@
+serverAddr = "FRP_SERVER_HOST"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "CHANGE_ME_STRONG_TOKEN"
+
+transport.tcpMux = true
+
+[[proxies]]
+name = "wan-inference-api"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8100
+remotePort = 18100
