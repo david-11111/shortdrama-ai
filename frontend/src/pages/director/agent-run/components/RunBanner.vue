@@ -154,7 +154,7 @@ function cleanSummary(value: string): string {
 
 .banner span {
   color: #8b949e;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .banner-success {

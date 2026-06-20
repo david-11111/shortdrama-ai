@@ -262,7 +262,24 @@ class TestInfrastructurePreflightWorker:
 class TestInfrastructurePreflightKeyPool:
     """验证 Provider key pool 无可用 key 时预检护栏正确拦截."""
 
-    async def test_key_pool_exhausted_blocks_video_gen(self, monkeypatch):
+    async def test_ltx_video_gen_skips_key_pool_capacity(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr("app.services.infrastructure_preflight.redis_client", _FakeAsyncRedis(ping_ok=True))
+        monkeypatch.setattr(
+            "app.services.infrastructure_preflight._check_celery_queue_worker",
+            lambda q: True,
+        )
+        monkeypatch.setattr(
+            "app.services.infrastructure_preflight.check_capacity_sync",
+            lambda p: calls.append(p),
+        )
+
+        result = await guard_infrastructure_preflight("video_gen")
+
+        assert result is None
+        assert calls == []
+
+    async def test_explicit_seedance_key_pool_exhausted_blocks_video_gen(self, monkeypatch):
         """故障注入：available_slots=0 且 cooldown 中"""
         monkeypatch.setattr("app.services.infrastructure_preflight.redis_client", _FakeAsyncRedis(ping_ok=True))
         monkeypatch.setattr(
@@ -275,7 +292,7 @@ class TestInfrastructurePreflightKeyPool:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await guard_infrastructure_preflight("video_gen")
+            await guard_infrastructure_preflight("video_gen", provider="seedance")
 
         assert "provider_seedance" in exc_info.value.detail["failed_checks"]
 

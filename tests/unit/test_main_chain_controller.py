@@ -112,7 +112,7 @@ async def test_execute_video_decision_passes_runtime_capabilities_to_gateway(mon
 
     assert result.status == "dispatched"
     assert "video_generation" in observed["context"].runtime_features
-    assert "seedance_image_to_video" in observed["context"].provider_capabilities
+    assert "ltx23_image_to_video" in observed["context"].provider_capabilities
 
 
 @pytest.mark.asyncio

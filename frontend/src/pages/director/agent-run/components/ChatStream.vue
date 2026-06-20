@@ -109,15 +109,15 @@ watch(
   gap: 18px;
   border-bottom: 1px solid #30363d;
   background: rgba(13, 17, 23, 0.96);
-  padding: 20px 28px 18px;
-  backdrop-filter: blur(8px);
+  padding: 14px 28px 12px;
 }
 
 .chat-header h1 {
   margin: 0;
   color: #e6edf3;
-  font-size: 18px;
-  line-height: 1.35;
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 500;
 }
 
 .chat-header p {
@@ -127,16 +127,16 @@ watch(
 .eyebrow {
   margin-bottom: 4px;
   color: #58a6ff;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
   text-transform: uppercase;
 }
 
 .chat-status {
-  margin-top: 4px;
+  margin-top: 3px;
   color: #8b949e;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .chat-header button {
@@ -146,7 +146,7 @@ watch(
   background: #161b22;
   color: #e6edf3;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
   transition: border-color 0.2s;
 }
@@ -186,7 +186,7 @@ watch(
 
 .empty-state strong {
   color: #e6edf3;
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .empty-state span {

@@ -115,6 +115,30 @@ async def create_run(
                 current_user=current_user,
             )
             result["routed_from"] = "production_run_missing_storyboard"
+            if await _project_has_storyboard_shots(db, project_id=project_id, user_id=user_id):
+                production_result = await start_video_production(
+                    project_id=project_id,
+                    body=production_body,
+                    db=db,
+                    current_user=current_user,
+                )
+                await _publish_input_assets_event(
+                    db,
+                    run_id=str(production_result.get("agent_run_id") or ""),
+                    project_id=project_id,
+                    user_id=user_id,
+                    input_assets=input_assets,
+                )
+                return {
+                    "run_id": production_result.get("agent_run_id"),
+                    "project_id": project_id,
+                    "status": production_result.get("status") or "queued",
+                    "mode": mode,
+                    "action": action,
+                    "task_id": production_result.get("task_id"),
+                    "production_run_id": production_result.get("production_run_id"),
+                    "result": {**result, "production_result": production_result},
+                }
             await _publish_input_assets_event(
                 db,
                 run_id=str(result.get("run_id") or ""),
@@ -174,6 +198,17 @@ async def create_run(
         user_id=user_id,
         input_assets=input_assets,
     )
+    # ── Autopilot: start production driver in background ─────────────
+    if mode == "autopilot" and run_id:
+        asyncio.ensure_future(
+            _production_driver(
+                run_id=str(run_id),
+                project_id=project_id,
+                user_id=user_id,
+                mode="autopilot",
+            )
+        )
+
     return {
         "run_id": run_id,
         "project_id": project_id,
@@ -256,13 +291,16 @@ async def stream_run_events(
     current_status = await _get_run_status(db, run_id=run_id, user_id=user_id)
 
     async def event_stream():
+        terminal_statuses = {"completed", "failed", "blocked", "cancelled"}
         seen = set()
         for event in _stream_history_order(history):
+            if str(event.get("visibility") or "user") == "debug":
+                continue
             seen.add(str(event["id"]))
             yield _sse("execution_event", event, event_id=str(event["id"]))
 
         yield _sse("stream_ready", {"run_id": run_id, "project_id": project_id, "status": current_status})
-        if current_status == "cancelled":
+        if current_status in terminal_statuses:
             yield _sse("stream_done", {"run_id": run_id, "project_id": project_id, "status": current_status})
             return
 
@@ -287,12 +325,14 @@ async def stream_run_events(
                     event_id = str(event.get("id") or "")
                     if event_id and event_id in seen:
                         continue
+                    if str(event.get("visibility") or "user") == "debug":
+                        continue
                     if event_id:
                         seen.add(event_id)
                     yield _sse("execution_event", event, event_id=event_id or None)
                     if str(event.get("status") or "") in {"completed", "done", "failed", "blocked", "cancelled"} and str(event.get("phase") or "") in {"completed", "failed", "blocked", "cancelled", "writeback_review"}:
                         status = await _get_run_status(db, run_id=run_id, user_id=user_id)
-                        if status == "cancelled":
+                        if status in terminal_statuses:
                             yield _sse("stream_done", {"run_id": run_id, "project_id": project_id, "status": status})
                             return
                 else:
@@ -300,7 +340,7 @@ async def stream_run_events(
                     if idle_ticks % 15 == 0:
                         status = await _get_run_status(db, run_id=run_id, user_id=user_id)
                         yield _sse("heartbeat", {"run_id": run_id, "status": status})
-                        if status == "cancelled":
+                        if status in terminal_statuses:
                             yield _sse("stream_done", {"run_id": run_id, "project_id": project_id, "status": status})
                             return
                 await asyncio.sleep(0)
@@ -355,8 +395,21 @@ async def change_provider_and_retry(
     current_user: dict = Depends(get_current_user),
 ):
     provider = str((body or {}).get("provider") or "kling").strip().lower()
-    if provider not in {"seedance", "kling", "ltx2.3", "wan2.1", "wan2_1", "wan", "ltx", "comfyui"}:
-        raise HTTPException(status_code=400, detail="provider must be a valid video provider (seedance, kling, ltx2.3, etc.)")
+    if provider not in {
+        "seedance",
+        "kling",
+        "ltx2.3",
+        "wan2.1",
+        "wan2_1",
+        "wan",
+        "ltx",
+        "comfyui",
+        "joy-echo",
+        "joy_echo",
+        "joyai-echo",
+        "joyai_echo",
+    }:
+        raise HTTPException(status_code=400, detail="provider must be a valid video provider (seedance, kling, joy-echo, ltx2.3, etc.)")
     user_id = int(current_user["id"])
     project_id = await _ensure_run_owner(db, run_id=run_id, user_id=user_id)
     async with _run_action_lock(db, run_id=run_id, action="change_provider"):
@@ -937,6 +990,21 @@ async def continue_run_step(
                 response["status"] = "dispatched"
                 response["followup_action"] = followup_action
                 response["result"] = result
+            # ── Auto-rework loop ──────────────────────────────────────
+            # After a production dispatch, start a background loop that
+            # polls the state machine for rework conditions and auto-drives
+            # the rework cycle until retries are exhausted or the run finishes.
+            if response.get("status") in {"dispatched", "answered"}:
+                resolved = str(routing.get("resolved_action") or "")
+                if resolved in {"generate_keyframes", "generate_videos", "plan_final_edit"}:
+                    asyncio.ensure_future(
+                        _production_driver(
+                            run_id=run_id,
+                            project_id=project_id,
+                            user_id=current_user["id"],
+                            mode=str(routing.get("mode", "step")),
+                        )
+                    )
             return response
         if execution and execution.status == "deferred":
             pending_instruction = {
@@ -1254,6 +1322,107 @@ async def export_partial_run(
         return {"run_id": run_id, "project_id": project_id, "action": "export_partial", "shot_indices": shot_indices, "result": result}
 
 
+@router.post("/{run_id}/actions/skip-shot")
+async def skip_shot(
+    run_id: str,
+    body: dict[str, Any] | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """跳过指定镜头（标记为 skipped），让管道能继续前进。
+
+    body 需含:
+        shot_index: int  — 要跳过的镜头序号
+        或不传 shot_index（跳过所有失败/阻塞镜头）
+    """
+    user_id = int(current_user["id"])
+    project_id = await _ensure_run_owner(db, run_id=run_id, user_id=user_id)
+    async with _run_action_lock(db, run_id=run_id, action="skip_shot"):
+        status = await _get_run_status_for_update(db, run_id=run_id, user_id=user_id)
+        if status == "cancelled":
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Cannot skip shot; agent run is cancelled", "run_id": run_id, "status": status},
+            )
+
+        shot_index = None
+        if body and "shot_index" in body:
+            shot_index = int(body["shot_index"])
+
+        if shot_index is not None:
+            # 跳过指定镜头
+            result = await db.execute(
+                text("""
+                    UPDATE shot_rows
+                    SET selected = false, status = 'skipped', updated_at = NOW()
+                    WHERE project_id = :project_id
+                      AND user_id = :user_id
+                      AND shot_index = :shot_index
+                """),
+                {"project_id": project_id, "user_id": user_id, "shot_index": shot_index},
+            )
+            affected = result.rowcount
+            if affected == 0:
+                raise HTTPException(status_code=404, detail=f"Shot {shot_index} not found")
+            skipped_indices = [shot_index]
+        else:
+            # 跳过所有失败/阻塞镜头（无 selected_video 但有 error 或 review blocker）
+            result = await db.execute(
+                text("""
+                    UPDATE shot_rows
+                    SET selected = false, status = 'skipped', updated_at = NOW()
+                    WHERE project_id = :project_id
+                      AND user_id = :user_id
+                      AND selected = true
+                      AND (selected_video IS NULL OR selected_video = '')
+                      AND (
+                        last_error IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM tasks t
+                            WHERE t.run_id = CAST(:run_id AS UUID)
+                              AND t.project_id = :project_id
+                              AND t.user_id = :user_id
+                              AND t.task_type = 'video_gen'
+                              AND t.status IN ('failed', 'dead_letter', 'cancelled')
+                              AND (t.payload->>'shot_index')::int = shot_rows.shot_index
+                        )
+                      )
+                """),
+                {"run_id": run_id, "project_id": project_id, "user_id": user_id},
+            )
+            skipped_indices = result.fetchone()
+            # 重新查询被更新的 shot_index
+            skipped = await db.execute(
+                text("""
+                    SELECT shot_index FROM shot_rows
+                    WHERE project_id = :project_id
+                      AND user_id = :user_id
+                      AND status = 'skipped'
+                      AND updated_at > NOW() - INTERVAL '5 seconds'
+                """),
+                {"project_id": project_id, "user_id": user_id},
+            )
+            skipped_indices = [row[0] for row in skipped.fetchall()]
+
+        await db.commit()
+
+        await _audit_agent_run_action(
+            user_id=user_id,
+            action="agent_run.skip_shot",
+            run_id=run_id,
+            project_id=project_id,
+            payload={"shot_indices": skipped_indices},
+        )
+
+        return {
+            "run_id": run_id,
+            "project_id": project_id,
+            "action": "skip_shot",
+            "shot_indices": skipped_indices,
+            "skipped_count": len(skipped_indices),
+        }
+
+
 @router.post("/{run_id}/actions/keyframe-batch/preview")
 async def preview_keyframe_batch(
     run_id: str,
@@ -1299,101 +1468,52 @@ async def generate_keyframe_batch(
     payload = body or {}
     shot_index = _positive_int(payload.get("shot_index"), field="shot_index")
     count = _bounded_count(payload.get("count"), default=3, max_count=4)
-    async with _run_action_lock(db, run_id=run_id, action=f"generate_keyframe_batch:{shot_index}"):
-        await _ensure_run_can_dispatch(db, run_id=run_id, user_id=user_id, action="generate_keyframe_batch")
-        current_status = await _get_run_status_for_update(db, run_id=run_id, user_id=user_id)
-        if current_status in {"completed", "cancelled"}:
-            raise HTTPException(status_code=409, detail={"message": "Cannot generate keyframe batch for terminal run", "run_id": run_id, "status": current_status})
-        shot = await _load_shot_for_keyframe_pool(db, project_id=project_id, user_id=user_id, shot_index=shot_index)
-        prompts = _build_keyframe_variation_prompts(
-            shot,
-            count=count,
-            strategy=str(payload.get("variation_strategy") or "mixed"),
-            instruction=str(payload.get("instruction") or payload.get("goal") or ""),
-        )
-        unit_price = int(await credit_service.get_price("image_gen") or 0)
-        total_cost = count * unit_price
-        await assert_cost_guard(db, user_id=user_id, credits_to_reserve=total_cost)
-        transaction_ids: list[str] = []
-        task_ids: list[str] = []
-        task_payloads: list[dict[str, Any]] = []
-        try:
-            for _ in range(count):
-                transaction_ids.append(await reserve_credits(user_id, "image_gen", 1))
-            priority = {"free": 5, "pro": 3, "enterprise": 1}.get(str(current_user.get("tier") or "free").lower(), 5)
-            for index, prompt_item in enumerate(prompts):
-                task_id = str(__import__("uuid").uuid4())
-                task_ids.append(task_id)
-                task_payload = {
-                    "provider": str(payload.get("provider") or "seedream"),
-                    "project_id": project_id,
-                    "run_id": run_id,
-                    "shot_index": shot_index,
-                    "prompt": prompt_item["prompt"],
-                    "variation": prompt_item["variation"],
-                    "keyframe_pool_batch": True,
-                    "shot_row": {**shot, "prompt": prompt_item["prompt"], "project_id": project_id, "user_id": user_id},
-                }
-                for semantic_key in ("intent_brief", "semantic_plan", "constraint_packet", "verification_plan", "human_routing"):
-                    if isinstance(payload.get(semantic_key), dict):
-                        task_payload[semantic_key] = payload[semantic_key]
-                task_payload = adapt_provider_payload(task_payload, task_type="image_gen", provider=str(task_payload.get("provider") or "seedream"))
-                task_payloads.append(task_payload)
-                await db.execute(
-                    text(
-                        """
-                        INSERT INTO tasks (task_id, user_id, project_id, run_id, task_type, status, priority, payload, credits_reserved, credit_transaction_id)
-                        VALUES (:task_id, :user_id, :project_id, CAST(:run_id AS UUID), 'image_gen', 'queued', :priority, CAST(:payload AS JSONB), :credits, :credit_transaction_id)
-                        """
-                    ),
-                    {
-                        "task_id": task_id,
-                        "user_id": user_id,
-                        "project_id": project_id,
-                        "run_id": run_id,
-                        "priority": priority,
-                        "payload": json.dumps({**task_payload, "_credit_transaction_id": transaction_ids[index]}, ensure_ascii=False, default=str),
-                        "credits": unit_price,
-                        "credit_transaction_id": transaction_ids[index],
-                    },
-                )
-            await db.execute(
-                text("UPDATE shot_rows SET status = 'generating_image', updated_at = NOW() WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index"),
-                {"project_id": project_id, "user_id": user_id, "shot_index": shot_index},
-            )
-            await publish_agent_event(
-                db,
-                run_id=run_id,
-                project_id=project_id,
-                user_id=user_id,
-                source="queue",
-                event_type="tool_call",
-                phase="generate_keyframe_batch",
-                title="批量关键帧任务已派发",
-                detail=f"shot_index={shot_index}; count={count}; credits={total_cost}",
-                status="queued",
-                progress=55,
-                meta={"shot_index": shot_index, "count": count, "child_task_ids": task_ids, "estimated_credits": total_cost, "prompts": prompts},
-                actor="executor",
-                event_kind="dispatch",
-                visibility="user",
-                summary=f"第 {shot_index} 镜已派发 {count} 张候选关键帧",
-                reason="图片池批量生成走现有 image_gen worker，并受成本、并发和 run 锁控制。",
-            )
-            await update_agent_run(db, run_id=run_id, status="dispatching", current_phase="generate_keyframe_batch", summary=f"Queued {count} keyframe candidate task(s).", final_decision=f"queued {count} keyframe candidates", reserved_credits_delta=total_cost)
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            for transaction_id in transaction_ids:
-                try:
-                    await credit_service.refund(transaction_id)
-                except Exception:
-                    pass
-            raise
-        for index, task_id in enumerate(task_ids):
-            celery_app.send_task("app.tasks.image_tasks.generate_image_task", args=[task_id, str(user_id), task_payloads[index]], kwargs={"transaction_id": transaction_ids[index]}, queue="image", priority=priority)
-        await _audit_agent_run_action(user_id=user_id, action="agent_run.generate_keyframe_batch", run_id=run_id, project_id=project_id, payload={"shot_index": shot_index, "count": count, "task_ids": task_ids, "credits": total_cost})
-        return {"run_id": run_id, "project_id": project_id, "action": "generate_keyframe_batch", "shot_index": shot_index, "count": count, "task_ids": task_ids, "estimated_credits": total_cost, "status": "queued"}
+    continue_body = {
+        **payload,
+        "action": "generate_keyframes",
+        "continue_action": "generate_keyframes",
+        "instruction": str(payload.get("instruction") or payload.get("goal") or "generate keyframe candidates"),
+        "source_run_id": run_id,
+        "shot_indices": [shot_index],
+        "keyframe_pool_batch": True,
+        "candidate_count": count,
+    }
+    result = await continue_project_brain(
+        project_id=project_id,
+        body=continue_body,
+        db=db,
+        current_user=current_user,
+    )
+    await _audit_agent_run_action(
+        user_id=user_id,
+        action="agent_run.generate_keyframe_batch.requested",
+        run_id=run_id,
+        project_id=project_id,
+        payload={"shot_index": shot_index, "count": count, "result_run_id": result.get("run_id")},
+    )
+    child_task_ids = result.get("child_task_ids") or []
+    if not isinstance(child_task_ids, list):
+        child_task_ids = []
+    task_ids = result.get("task_ids") or child_task_ids
+    if not isinstance(task_ids, list):
+        task_ids = []
+    return {
+        "run_id": run_id,
+        "result_run_id": result.get("run_id"),
+        "project_id": project_id,
+        "action": "generate_keyframe_batch",
+        "shot_index": shot_index,
+        "count": count,
+        "status": result.get("status", "queued"),
+        "parent_task_id": result.get("parent_task_id"),
+        "child_task_ids": child_task_ids,
+        "task_ids": task_ids,
+        "task_id": result.get("task_id") or (task_ids[0] if task_ids else None),
+        "queued_count": result.get("queued_count", len(task_ids)),
+        "deferred_count": result.get("deferred_count", 0),
+        "estimated_credits": result.get("total_credits_reserved", result.get("estimated_credits")),
+        "result": result,
+    }
 
 
 @router.post("/{run_id}/actions/select-keyframe-candidate")
@@ -1519,128 +1639,73 @@ async def generate_video_from_pool(
                 "reason": "Multi-image morph sequence is not enabled until provider support is verified.",
             },
         )
-    provider = _normalize_video_pool_provider(payload.get("provider") or "ltx2.3")
+    provider = _normalize_video_pool_provider(payload.get("provider") or "joy-echo")
     duration = _bounded_video_duration(payload.get("duration"), default=15)
     operation = _video_operation_for_duration(duration)
-
-    async with _run_action_lock(db, run_id=run_id, action=f"generate_video_from_pool:{shot_index}"):
-        await _ensure_run_can_dispatch(db, run_id=run_id, user_id=user_id, action="generate_video_from_pool")
-        shot = await _load_shot_for_keyframe_pool(db, project_id=project_id, user_id=user_id, shot_index=shot_index)
-        candidate_url = str(payload.get("url") or payload.get("candidate_url") or "").strip()
-        artifact_id = str(payload.get("artifact_id") or "").strip()
-        selected_image = await _resolve_keyframe_candidate_url(
-            db,
-            project_id=project_id,
-            user_id=user_id,
-            shot=shot,
-            artifact_id=artifact_id,
-            candidate_url=candidate_url or str(shot.get("selected_image") or "").strip(),
-        )
-        shot = {**shot, "selected_image": selected_image, "image_url": selected_image, "project_id": project_id, "user_id": user_id, "duration": duration}
-        await db.execute(
-            text(
-                """
-                UPDATE shot_rows
-                SET selected_image = :selected_image,
-                    status = 'image_done',
-                    updated_at = NOW()
-                WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index
-                """
-            ),
-            {"selected_image": selected_image, "project_id": project_id, "user_id": user_id, "shot_index": shot_index},
-        )
-        await _ensure_action_gate_allows(db, run_id=run_id, project_id=project_id, user_id=user_id, action="generate_videos")
-
-        unit_price = int(await credit_service.get_price(operation) or 0)
-        await assert_cost_guard(db, user_id=user_id, credits_to_reserve=unit_price)
-        transaction_id = ""
-        task_id = str(__import__("uuid").uuid4())
-        task_payload = {
-            "provider": provider,
-            "project_id": project_id,
-            "run_id": run_id,
-            "shot_index": shot_index,
-            "prompt": str(shot.get("prompt") or ""),
-            "duration": duration,
-            "image_url": selected_image,
-            "mode": mode,
-            "keyframe_pool_video": True,
-            "shot_row": shot,
-        }
-        if provider in {"ltx2.3", "wan", "wan2.1", "wan2_1"}:
-            task_payload.update({"width": 1088, "height": 960, "steps": 10, "timeout_seconds": 3600})
-        for semantic_key in ("intent_brief", "semantic_plan", "constraint_packet", "verification_plan", "human_routing"):
-            if isinstance(payload.get(semantic_key), dict):
-                task_payload[semantic_key] = payload[semantic_key]
-        task_payload = adapt_provider_payload(task_payload, task_type="video_gen", provider=provider)
-        priority = {"free": 5, "pro": 3, "enterprise": 1}.get(str(current_user.get("tier") or "free").lower(), 5)
-        try:
-            transaction_id = await reserve_credits(user_id, operation, 1)
-            await db.execute(
-                text(
-                    """
-                    INSERT INTO tasks (task_id, user_id, project_id, run_id, task_type, status, priority, payload, credits_reserved, credit_transaction_id)
-                    VALUES (:task_id, :user_id, :project_id, CAST(:run_id AS UUID), 'video_gen', 'queued', :priority, CAST(:payload AS JSONB), :credits, :credit_transaction_id)
-                    """
-                ),
-                {
-                    "task_id": task_id,
-                    "user_id": user_id,
-                    "project_id": project_id,
-                    "run_id": run_id,
-                    "priority": priority,
-                    "payload": json.dumps({**task_payload, "_credit_transaction_id": transaction_id}, ensure_ascii=False, default=str),
-                    "credits": unit_price,
-                    "credit_transaction_id": transaction_id,
-                },
-            )
-            await db.execute(
-                text("UPDATE shot_rows SET status = 'generating_video', updated_at = NOW() WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index"),
-                {"project_id": project_id, "user_id": user_id, "shot_index": shot_index},
-            )
-            await publish_agent_event(
-                db,
-                run_id=run_id,
-                project_id=project_id,
-                user_id=user_id,
-                source="queue",
-                event_type="tool_call",
-                phase="generate_video_from_pool",
-                title="图片池视频任务已派发",
-                detail=f"shot_index={shot_index}; provider={provider}; duration={duration}; credits={unit_price}",
-                status="queued",
-                progress=72,
-                meta={"shot_index": shot_index, "child_task_ids": [task_id], "provider": provider, "duration": duration, "estimated_credits": unit_price, "mode": mode},
-                actor="executor",
-                event_kind="dispatch",
-                visibility="user",
-                summary=f"第 {shot_index} 镜已用图片池主图派发视频生成",
-                reason="图片池视频生成复用现有 video_gen worker，并受状态机、成本、并发和 run 锁控制。",
-            )
-            await update_agent_run(db, run_id=run_id, status="dispatching", current_phase="generate_video_from_pool", summary=f"Queued video task for shot {shot_index}.", final_decision=f"queued video from keyframe pool for shot {shot_index}", reserved_credits_delta=unit_price)
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            if transaction_id:
-                try:
-                    await credit_service.refund(transaction_id)
-                except Exception:
-                    pass
-            raise
-        celery_app.send_task("app.tasks.video_tasks.generate_video_task", args=[task_id, str(user_id), task_payload], kwargs={"transaction_id": transaction_id}, queue="video", priority=priority)
-        await _audit_agent_run_action(user_id=user_id, action="agent_run.generate_video_from_pool", run_id=run_id, project_id=project_id, payload={"shot_index": shot_index, "task_id": task_id, "provider": provider, "duration": duration, "credits": unit_price})
-        return {"run_id": run_id, "project_id": project_id, "action": "generate_video_from_pool", "shot_index": shot_index, "task_id": task_id, "provider": provider, "duration": duration, "estimated_credits": unit_price, "status": "queued"}
+    selected_image = str(payload.get("url") or payload.get("candidate_url") or payload.get("selected_image") or "").strip()
+    continue_body = {
+        **payload,
+        "action": "generate_videos",
+        "continue_action": "generate_videos",
+        "instruction": str(payload.get("instruction") or payload.get("goal") or "generate video from selected keyframe"),
+        "source_run_id": run_id,
+        "shot_indices": [shot_index],
+        "provider": provider,
+        "video_provider": provider,
+        "duration": duration,
+        "selected_image": selected_image,
+        "artifact_id": str(payload.get("artifact_id") or "").strip(),
+        "keyframe_pool_video": True,
+    }
+    result = await continue_project_brain(
+        project_id=project_id,
+        body=continue_body,
+        db=db,
+        current_user=current_user,
+    )
+    await _audit_agent_run_action(
+        user_id=user_id,
+        action="agent_run.generate_video_from_pool.requested",
+        run_id=run_id,
+        project_id=project_id,
+        payload={"shot_index": shot_index, "provider": provider, "duration": duration, "result_run_id": result.get("run_id")},
+    )
+    child_task_ids = result.get("child_task_ids") or []
+    if not isinstance(child_task_ids, list):
+        child_task_ids = []
+    task_ids = result.get("task_ids") or child_task_ids
+    if not isinstance(task_ids, list):
+        task_ids = []
+    return {
+        "run_id": run_id,
+        "result_run_id": result.get("run_id"),
+        "project_id": project_id,
+        "action": "generate_video_from_pool",
+        "shot_index": shot_index,
+        "provider": provider,
+        "duration": duration,
+        "status": result.get("status", "queued"),
+        "parent_task_id": result.get("parent_task_id"),
+        "child_task_ids": child_task_ids,
+        "task_ids": task_ids,
+        "task_id": result.get("task_id") or (task_ids[0] if task_ids else None),
+        "queued_count": result.get("queued_count", len(task_ids)),
+        "deferred_count": result.get("deferred_count", 0),
+        "estimated_credits": result.get("total_credits_reserved", result.get("estimated_credits")),
+        "result": result,
+    }
 
 
 def _normalize_video_pool_provider(raw_provider: Any) -> str:
-    provider = str(raw_provider or "ltx2.3").strip().lower()
-    allowed = ["seedance", "kling", "ltx2.3", "wan", "wan2.1", "wan2_1", "ltx", "comfyui"]
-    if provider not in set(allowed):
+    from app.services.video_provider import get_config, list_all_names
+    provider = str(raw_provider or "joy-echo").strip().lower()
+    cfg = get_config(provider)
+    if cfg is None:
         raise HTTPException(
             status_code=400,
-            detail={"message": "unsupported video provider", "provider": provider, "allowed": allowed},
+            detail={"message": "unsupported video provider", "provider": provider, "allowed": list_all_names()},
         )
-    return provider
+    return cfg.name
 
 
 @router.post("/{run_id}/actions/cancel")
@@ -1997,6 +2062,43 @@ async def _apply_state_machine_recovery_routing(
         tasks=state["tasks"],
         production_run=state["production_run"],
     )
+    planner_action = str(planner.get("action") or "").strip()
+
+    # ── Rework redirect (new structured path) ─────────────────────────
+    rework_redirect = next_action.get("rework_redirect")
+    if rework_redirect:
+        rework_to = str(rework_redirect.get("rework_to") or "")
+        if not planner_action or planner_action == rework_to:
+            back_stage_id = rework_to
+            back_reason = str(rework_redirect.get("reason") or next_action.get("reason", ""))
+            missing = [str(m) for m in rework_redirect.get("missing") or []]
+            next_routing = {
+                **routing,
+                "resolved_action": next_action["action"],
+                "routing_source": "state_machine_recovery",
+                "intent_type": "production_action",
+                "target_domain": classify_target_domain(
+                    str(routing.get("instruction") or ""), action=next_action["action"]
+                ),
+                "state_machine_recovery": {
+                    "action": next_action["action"],
+                    "stage_id": back_stage_id,
+                    "reason": back_reason,
+                    "missing": missing,
+                    "planner_action": planner_action,
+                    "rework_scope": rework_redirect.get("scope", "affected"),
+                },
+            }
+            next_body = {
+                **continue_body,
+                "action": next_action["action"],
+                "continue_action": next_action["action"],
+                "human_routing": next_routing,
+            }
+            return next_body, next_routing
+        return continue_body, routing
+
+    # ── Legacy gate recovery fallback ─────────────────────────────────
     gate = evaluate_action_gate(
         str(next_action.get("action") or ""),
         shots=state["shots"],
@@ -2004,7 +2106,6 @@ async def _apply_state_machine_recovery_routing(
         production_run=state["production_run"],
     )
     recovery_action = str(gate.get("recovery") or "").strip()
-    planner_action = str(planner.get("action") or "").strip()
     if not recovery_action:
         return continue_body, routing
     if planner_action and planner_action != recovery_action:
@@ -2024,6 +2125,13 @@ async def _apply_state_machine_recovery_routing(
             "planner_action": planner_action,
         },
     }
+    next_body = {
+        **continue_body,
+        "action": recovery_action,
+        "continue_action": recovery_action,
+        "human_routing": next_routing,
+    }
+    return next_body, next_routing
 
 
 async def _project_has_storyboard_shots(db: AsyncSession, *, project_id: str, user_id: int) -> bool:
@@ -2041,13 +2149,6 @@ async def _project_has_storyboard_shots(db: AsyncSession, *, project_id: str, us
         {"project_id": project_id, "user_id": user_id},
     )
     return result.fetchone() is not None
-    next_body = {
-        **continue_body,
-        "action": recovery_action,
-        "continue_action": recovery_action,
-        "human_routing": next_routing,
-    }
-    return next_body, next_routing
 
 
 async def _apply_review_blocker_clarification_routing(
@@ -2071,13 +2172,20 @@ async def _apply_review_blocker_clarification_routing(
         tasks=state["tasks"],
         production_run=state["production_run"],
     )
-    gate = evaluate_action_gate(
-        str(next_action.get("action") or ""),
-        shots=state["shots"],
-        tasks=state["tasks"],
-        production_run=state["production_run"],
-    )
-    missing = [str(item) for item in gate.get("missing") or []]
+    # ── Honour rework redirect if present ─────────────────────────
+    rework_redirect = next_action.get("rework_redirect")
+    if rework_redirect:
+        missing = [str(m) for m in rework_redirect.get("missing") or []]
+        reason = str(rework_redirect.get("reason") or next_action.get("reason", ""))
+    else:
+        gate = evaluate_action_gate(
+            str(next_action.get("action") or ""),
+            shots=state["shots"],
+            tasks=state["tasks"],
+            production_run=state["production_run"],
+        )
+        missing = [str(item) for item in gate.get("missing") or []]
+        reason = gate.get("reason") or next_action.get("reason") or ""
     if "image_review_blockers" not in set(missing):
         return continue_body, routing
     instruction = str(routing.get("instruction") or "")
@@ -2085,6 +2193,35 @@ async def _apply_review_blocker_clarification_routing(
         return continue_body, routing
 
     proposal = _build_keyframe_review_repair_proposal(state["shots"])
+    if (
+        proposal
+        and routing.get("routing_source") == "state_machine_recovery"
+        and proposal.get("recommendation") == "regenerate_review_failed_keyframes"
+    ):
+        next_routing = {
+            **routing,
+            "resolved_action": "generate_keyframes",
+            "routing_source": "state_machine_recovery",
+            "intent_type": "production_action",
+            "action_ceiling": "execute_allowed",
+            "review_blocker_clarification": {
+                "missing": missing,
+                "reason": reason,
+                "proposal": proposal,
+            },
+        }
+        default_instruction = str(proposal.get("default_instruction") or "").strip()
+        next_body = {
+            **continue_body,
+            "action": "generate_keyframes",
+            "continue_action": "generate_keyframes",
+            "shot_indices": proposal["shot_indices"],
+            "human_routing": next_routing,
+        }
+        if default_instruction:
+            next_body["instruction"] = default_instruction
+            next_body["goal"] = default_instruction
+        return next_body, next_routing
     if proposal:
         labels = _format_shot_indices(proposal["shot_indices"])
         if proposal.get("recommendation") == "approve_review_pending_keyframes":
@@ -2121,7 +2258,7 @@ async def _apply_review_blocker_clarification_routing(
         "planner": next_planner,
         "review_blocker_clarification": {
             "missing": missing,
-            "reason": gate.get("reason") or next_action.get("reason") or "",
+            "reason": reason,
             "required": ["confirm_default_repair"] if proposal else ["shot_scope", "revision_instruction"],
         },
     }
@@ -2722,6 +2859,8 @@ def _should_confirm_pending_action(routing: dict[str, Any]) -> bool:
         "繼續執行",
         "继续吧",
         "繼續吧",
+        "continue",
+        "confirm",
         "ok",
         "yes",
     }
@@ -3857,7 +3996,9 @@ def _bounded_video_duration(value: Any, *, default: int) -> int:
         return 8
     if duration <= 10:
         return 10
-    return 15
+    if duration <= 15:
+        return 15
+    return min(duration, 300)
 
 
 def _video_operation_for_duration(duration: int) -> str:
@@ -3867,7 +4008,9 @@ def _video_operation_for_duration(duration: int) -> str:
         return "video_gen_8s"
     if duration <= 10:
         return "video_gen_10s"
-    return "video_gen_15s"
+    if duration <= 15:
+        return "video_gen_15s"
+    return "video_gen_long"
 
 
 async def _load_shot_for_keyframe_pool(db: AsyncSession, *, project_id: str, user_id: int, shot_index: int) -> dict[str, Any]:
@@ -4005,3 +4148,385 @@ async def _cancel_queued_run_tasks(db: AsyncSession, *, run_id: str, user_id: in
             {"task_ids": task_ids},
         )
     return {"cancelled_count": len(task_ids), "cancelled_task_ids": task_ids, "refunded_credits": refunded}
+
+
+# ── Production driver (auto-run + auto-rework) ────────────────────────────
+
+POLL_INTERVAL = 15          # seconds between state machine checks
+LOCK_TTL = 300              # seconds — lock expires after 5 min
+REWORK_REDIS_PREFIX = "rework_in_progress"
+REWORK_ATTEMPT_PREFIX = "rework_attempt"
+FORWARD_REDIS_PREFIX = "fwd_in_progress"
+
+
+async def _production_driver(
+    run_id: str,
+    project_id: str,
+    user_id: int,
+    mode: str = "step",  # "step" | "autopilot"
+) -> None:
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+    _logger.info("production_driver started for run %s (mode=%s)", run_id, mode)
+
+    try:
+        redis = aioredis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+    except Exception as exc:
+        _logger.warning("production_driver: cannot connect to Redis (%s), skipping", exc)
+        return
+
+    try:
+        lock_key = f"{REWORK_REDIS_PREFIX}:{run_id}"
+        attempt_key = f"{REWORK_ATTEMPT_PREFIX}:{run_id}"
+
+        while True:
+            from app.db import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                run_status = await _get_run_status_for_update(db, run_id=run_id, user_id=user_id)
+                if run_status in ("completed", "cancelled", "failed"):
+                    _logger.info("production_driver: run %s status=%s, exiting", run_id, run_status)
+                    break
+
+                state = await _run_production_state(db, run_id=run_id, project_id=project_id, user_id=user_id)
+                from app.services.state_machine import recommend_next_action, should_escalate
+                next_action = recommend_next_action(
+                    shots=state["shots"], tasks=state["tasks"], production_run=state["production_run"],
+                )
+                rework_redirect = next_action.get("rework_redirect")
+
+                # ── 1. Rework path (both step and autopilot) ────────────
+                if rework_redirect:
+                    locked = await redis.setnx(lock_key, "1")
+                    if not locked:
+                        await asyncio.sleep(POLL_INTERVAL)
+                        continue
+                    await redis.expire(lock_key, LOCK_TTL)
+                    try:
+                        attempt = int(await redis.get(attempt_key) or "0")
+                        escalation = should_escalate(rework_redirect, attempt + 1)
+                        if escalation != "proceed":
+                            await _handle_rework_escalation(
+                                db, redis, _logger,
+                                run_id=run_id, project_id=project_id, user_id=user_id,
+                                rework_redirect=rework_redirect, attempt=attempt,
+                                escalation=escalation, lock_key=lock_key, attempt_key=attempt_key,
+                            )
+                            break
+
+                        new_attempt = attempt + 1
+                        await redis.set(attempt_key, str(new_attempt))
+                        rework_action = next_action["action"]
+                        _logger.info("production_driver: run %s rework attempt %d -> %s", run_id, new_attempt, rework_action)
+                        await _audit_agent_run_action(
+                            user_id=user_id, action="agent_run.rework_auto",
+                            run_id=run_id, project_id=project_id,
+                            payload={"rework_action": rework_action, "attempt": new_attempt,
+                                     "max_retries": rework_redirect.get("max_retries", 3),
+                                     "reason": rework_redirect.get("reason", "")},
+                        )
+                        await _do_dispatch(
+                            db=db, _logger=_logger, run_id=run_id, project_id=project_id,
+                            user_id=user_id, run_status=run_status, action=rework_action,
+                            rework_redirect=rework_redirect, attempt=new_attempt,
+                        )
+                    finally:
+                        await redis.delete(lock_key)
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # ── 2. Forward progression (autopilot only) ─────────────
+                fwd_action = next_action.get("action", "")
+                fwd_status = next_action.get("status", "")
+                fwd_allowed = next_action.get("allowed", False)
+
+                if mode == "autopilot" and fwd_action:
+                    if fwd_action == "writeback_review" and fwd_status == "completed":
+                        _logger.info("production_driver: run %s DAG complete", run_id)
+                        await db.execute(
+                            text("UPDATE agent_runs SET status = 'completed', current_phase = 'completed', updated_at = NOW() WHERE id = CAST(:rid AS UUID)"),
+                            {"rid": run_id},
+                        )
+                        await db.commit()
+                        break
+
+                    if not fwd_allowed and fwd_status in ("blocked", "pending"):
+                        _logger.info("production_driver: run %s stage %s blocked (%s)", run_id, fwd_action, next_action.get("reason", ""))
+                        break
+
+                    if fwd_status in ("pending", "running") and fwd_allowed:
+                        fwd_lock_key = f"{FORWARD_REDIS_PREFIX}:{run_id}:{fwd_action}"
+                        fwd_locked = await redis.setnx(fwd_lock_key, "1")
+                        if fwd_locked:
+                            await redis.expire(fwd_lock_key, LOCK_TTL)
+                            try:
+                                from app.services.agent_runtime import ensure_run_budget
+                                has_budget = await ensure_run_budget(
+                                    db, run_id=run_id, project_id=project_id,
+                                    user_id=user_id, next_cost=1, label=fwd_action,
+                                )
+                                if not has_budget:
+                                    _logger.warning("production_driver: run %s budget exhausted", run_id)
+                                    break
+                                _logger.info("production_driver: run %s forward %s", run_id, fwd_action)
+                                await _do_dispatch(
+                                    db=db, _logger=_logger, run_id=run_id, project_id=project_id,
+                                    user_id=user_id, run_status=run_status, action=fwd_action,
+                                    rework_redirect=None, attempt=0,
+                                )
+                            finally:
+                                await redis.delete(fwd_lock_key)
+
+            await asyncio.sleep(POLL_INTERVAL)
+
+    except Exception as exc:
+        _logger.exception("production_driver: unexpected error for run %s: %s", run_id, exc)
+    finally:
+        try:
+            await redis.close()
+        except Exception:
+            pass
+        _logger.info("production_driver stopped for run %s", run_id)
+
+
+async def _handle_rework_escalation(
+    db, redis, _logger, *,
+    run_id, project_id, user_id, rework_redirect, attempt, escalation, lock_key, attempt_key,
+) -> None:
+    _logger.info("production_driver: run %s rework exhausted (attempt %d/%d), escalating to %s",
+                 run_id, attempt, rework_redirect.get("max_retries", 3), escalation)
+    if escalation == "skip_shot":
+        affects = rework_redirect.get("affects_shots", [])
+        if affects:
+            for shot_idx in affects:
+                await db.execute(
+                    text('''UPDATE shot_rows SET selected = false, status = 'skipped', updated_at = NOW()
+                        WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index'''),
+                    {"project_id": project_id, "user_id": user_id, "shot_index": shot_idx},
+                )
+            await db.commit()
+            await _audit_agent_run_action(
+                user_id=user_id, action="agent_run.rework_auto_skip",
+                run_id=run_id, project_id=project_id,
+                payload={"reason": "rework_exhausted", "shot_indices": affects, "escalation": escalation},
+            )
+    elif escalation == "change_provider":
+        PROVIDER_FALLBACK = ["kling", "seedance", "joy-echo", "ltx2.3", "wan2.1"]
+        provider_idx_key = f"rework_provider_idx:{run_id}"
+        current_idx = int(await redis.get(provider_idx_key) or "0")
+        if current_idx >= len(PROVIDER_FALLBACK):
+            _logger.warning("production_driver: run %s all providers exhausted", run_id)
+            affects = rework_redirect.get("affects_shots", [])
+            if affects:
+                for shot_idx in affects:
+                    await db.execute(
+                        text('''UPDATE shot_rows SET selected = false, status = 'skipped', updated_at = NOW()
+                            WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index'''),
+                        {"project_id": project_id, "user_id": user_id, "shot_index": shot_idx},
+                    )
+                await db.commit()
+            return
+        provider = PROVIDER_FALLBACK[current_idx]
+        await redis.set(provider_idx_key, str(current_idx + 1))
+        _logger.info("production_driver: run %s change_provider -> %s", run_id, provider)
+        await _reset_retryable_video_shots(db, run_id=run_id, project_id=project_id, user_id=user_id)
+        await _audit_agent_run_action(
+            user_id=user_id, action="agent_run.rework_auto_change_provider",
+            run_id=run_id, project_id=project_id,
+            payload={"provider": provider, "attempt": attempt, "max_retries": rework_redirect.get("max_retries", 3)},
+        )
+        provider_body = {
+            "action": "generate_videos", "continue_action": "generate_videos",
+            "video_provider": provider, "instruction": f"auto_rework:change_provider_to_{provider}",
+            "mode": "step", "auto_rework": True, "rework_attempt": attempt + 1,
+        }
+        await continue_project_brain(project_id=project_id, body=provider_body, db=db, current_user={"id": str(user_id)})
+
+
+async def _do_dispatch(
+    db, _logger, *,
+    run_id, project_id, user_id, run_status, action, rework_redirect, attempt,
+) -> None:
+    from app.services.agent_action_executor import ActionContext
+    body = {
+        "action": action, "continue_action": action,
+        "instruction": f"auto:{action}" if not rework_redirect else f"auto_rework:{rework_redirect.get('reason', '')}",
+        "mode": "step", "auto_rework": bool(rework_redirect), "rework_attempt": attempt,
+    }
+    routing = {
+        "resolved_action": action,
+        "routing_source": "auto_rework" if rework_redirect else "autopilot",
+        "intent_type": "production_action", "auto_rework": bool(rework_redirect),
+        "rework_attempt": attempt, "rework_redirect": rework_redirect or {},
+    }
+    ctx = ActionContext(
+        run_id=run_id, project_id=project_id, user_id=user_id,
+        action=action, instruction=body["instruction"],
+        routing=routing, continue_body=body,
+        current_status=run_status, active_tasks=None, diagnostics=None,
+    )
+    async def _exec(payload):
+        return await continue_project_brain(
+            project_id=project_id, body=payload, db=db, current_user={"id": str(user_id)},
+        )
+    await dispatch_agent_action(ctx, execute_continue_project=_exec)
+
+
+# ── Legacy alias ──────────────────────────────────────────────────────────
+
+
+async def _auto_rework_driver(
+    run_id: str,
+    project_id: str,
+    user_id: int,
+) -> None:
+    """Legacy wrapper — delegates to ``_production_driver`` with ``mode="step"``."""
+    await _production_driver(
+        run_id=run_id, project_id=project_id, user_id=user_id, mode="step",
+    )
+
+
+async def _load_shot_for_keyframe_pool(db: AsyncSession, *, project_id: str, user_id: int, shot_index: int) -> dict[str, Any]:
+    result = await db.execute(
+        text(
+            """
+            SELECT shot_index, prompt, duration, status, selected_image, selected_video,
+                   image_candidates_json, video_variants_json, last_error
+            FROM shot_rows
+            WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index
+            LIMIT 1
+            """
+        ),
+        {"project_id": project_id, "user_id": user_id, "shot_index": shot_index},
+    )
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="shot not found")
+    item = dict(row)
+    item["image_candidates"] = item.pop("image_candidates_json", []) or []
+    item["video_variants"] = item.pop("video_variants_json", []) or []
+    return item
+
+
+def _build_keyframe_variation_prompts(shot: dict[str, Any], *, count: int, strategy: str, instruction: str) -> list[dict[str, Any]]:
+    base = str(shot.get("prompt") or "").strip()
+    if not base:
+        raise HTTPException(status_code=400, detail="shot prompt is required before keyframe batch generation")
+    preflight = analyze_shot_risk(shot)
+    if preflight.get("risk_level") == "blocked":
+        codes = ", ".join(str(item.get("code") or "") for item in preflight.get("risks") or [] if isinstance(item, dict) and item.get("code"))
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "shot preflight blocked keyframe batch generation",
+                "shot_index": shot.get("shot_index"),
+                "risk_codes": codes,
+                "director_preflight": preflight,
+            },
+        )
+    labels_by_strategy = {
+        "angle": ["侧脸关系角度", "道具/手部特写", "环境全景建立", "低机位情绪角度"],
+        "lighting": ["冷色主光版本", "暖色侧逆光版本", "高对比电影光版本", "柔和自然光版本"],
+        "action_step": ["动作起始帧", "动作推进帧", "情绪落点帧", "动作后反应帧"],
+        "mixed": ["人物中近景", "关键道具特写", "环境氛围全景", "情绪反应特写"],
+    }
+    labels = labels_by_strategy.get(str(strategy or "").strip(), labels_by_strategy["mixed"])
+    return [
+        {
+            "shot_index": shot.get("shot_index"),
+            "variation": labels[index % len(labels)],
+            "prompt": f"{base}，{labels[index % len(labels)]}，不得改变原分镜中的人物身份、地点、道具和动作目标。{instruction}".strip(),
+        }
+        for index in range(count)
+    ]
+
+
+async def _resolve_keyframe_candidate_url(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    user_id: int,
+    shot: dict[str, Any],
+    artifact_id: str,
+    candidate_url: str,
+) -> str:
+    candidates = []
+    selected_image = str(shot.get("selected_image") or "").strip()
+    if selected_image:
+        candidates.append(selected_image)
+    raw_candidates = shot.get("image_candidates") if isinstance(shot.get("image_candidates"), list) else []
+    for item in raw_candidates:
+        if isinstance(item, dict):
+            candidates.extend(str(item.get(key) or "").strip() for key in ("url", "uri", "image_url"))
+        elif item:
+            candidates.append(str(item).strip())
+    if artifact_id:
+        result = await db.execute(
+            text(
+                """
+                SELECT uri
+                FROM agent_artifacts
+                WHERE id = CAST(:artifact_id AS UUID)
+                  AND project_id = :project_id
+                  AND user_id = :user_id
+                  AND artifact_type IN ('image', 'keyframe', 'reference_image')
+                LIMIT 1
+                """
+            ),
+            {"artifact_id": artifact_id, "project_id": project_id, "user_id": user_id},
+        )
+        row = result.mappings().first()
+        if row and str(row.get("uri") or "").strip():
+            return str(row.get("uri") or "").strip()
+    if candidate_url and candidate_url in {item for item in candidates if item}:
+        return candidate_url
+    if candidate_url and candidate_url.startswith(("/storage/", "/static/", "storage/", "uploads/", "http://", "https://")):
+        return candidate_url
+    raise HTTPException(status_code=400, detail="candidate image not found in keyframe pool")
+
+
+async def _cancel_queued_run_tasks(db: AsyncSession, *, run_id: str, user_id: int) -> dict[str, Any]:
+    result = await db.execute(
+        text(
+            """
+            SELECT task_id::text AS task_id, credits_reserved, credit_transaction_id, payload
+            FROM tasks
+            WHERE run_id = CAST(:run_id AS UUID)
+              AND user_id = :user_id
+              AND status IN ('pending', 'queued')
+            FOR UPDATE
+            """
+        ),
+        {"run_id": run_id, "user_id": user_id},
+    )
+    rows = result.mappings().all()
+    refunded = 0
+    task_ids: list[str] = []
+    for row in rows:
+        task_ids.append(str(row["task_id"]))
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        transaction_id = str(row.get("credit_transaction_id") or payload.get("_credit_transaction_id") or "").strip()
+        if transaction_id:
+            refunded += await credit_service.refund(transaction_id)
+    if task_ids:
+        update_query = text(
+            """
+            UPDATE tasks
+            SET status = 'cancelled', updated_at = NOW(), completed_at = NOW()
+            WHERE task_id IN :task_ids
+            """
+        ).bindparams(bindparam("task_ids", expanding=True))
+        await db.execute(
+            update_query,
+            {"task_ids": task_ids},
+        )
+    return {"cancelled_count": len(task_ids), "cancelled_task_ids": task_ids, "refunded_credits": refunded}
+
+
+# ── Auto-rework driver ────────────────────────────────────────────────────
+
+REWORK_POLL_INTERVAL = 15  # seconds between state machine checks
+REWORK_LOCK_TTL = 300      # seconds — lock expires after 5 min of inactivity
+REWORK_REDIS_PREFIX = "rework_in_progress"
+REWORK_ATTEMPT_PREFIX = "rework_attempt"
+
+

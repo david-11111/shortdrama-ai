@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,7 @@ from app.services.agent_run_state_machine import evaluate_action_gate, recommend
 from app.services.cost_guard import assert_cost_guard
 from app.services.credits import credit_service
 from app.services.director_preflight import analyze_shot_risk
+from app.services.director_input_protocol import director_protocol_allows_next_step
 from app.services.media_proxy import validate_public_media_url
 from app.services.project_brain import build_project_brain
 from app.services.project_continue import continue_project_from_brain
@@ -72,6 +74,7 @@ MAX_IMPORTED_ASSET_BYTES = 200 * 1024 * 1024
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".webm"}
 BRAIN_KEYFRAME_BATCH_MAX = 4
 BRAIN_VIDEO_BATCH_MAX = 4
+TEXT_ONLY_VIDEO_PROVIDERS = {"joy-echo", "joy_echo", "joyai-echo", "joyai_echo", "ltx2.3"}
 
 
 def _estimate_continue_credits(action: str, rows: list[dict[str, Any]], image_unit: int, video_unit: int) -> int:
@@ -93,6 +96,17 @@ def _estimate_continue_credits(action: str, rows: list[dict[str, Any]], image_un
         ]
         return max(0, min(len(targets), BRAIN_VIDEO_BATCH_MAX) * max(0, int(video_unit)))
     return 0
+
+
+def _guard_director_protocol_next_step(action: str, protocol: dict[str, Any] | None) -> None:
+    if action != "generate_videos" or not isinstance(protocol, dict):
+        return
+    if director_protocol_allows_next_step(protocol):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="director input protocol is not approved for next-step video generation",
+    )
 
 
 def _parse_json_object(value: Any) -> dict[str, Any] | None:
@@ -831,7 +845,7 @@ async def start_video_production(
     if provider_mode not in {"local", "real"}:
         provider_mode = "local"
     image_provider = str(payload.get("image_provider") or "seedream").strip().lower()
-    video_provider = str(payload.get("video_provider") or "ltx2.3").strip().lower()
+    video_provider = str(payload.get("video_provider") or "joy-echo").strip().lower()
     wait_provider_timeout_sec = int(payload.get("wait_provider_timeout_sec") or 1800)
     max_image_tasks = max(1, int(payload.get("max_image_tasks") or 3))
     max_video_tasks = max(1, int(payload.get("max_video_tasks") or 3))
@@ -1125,6 +1139,9 @@ async def continue_project_brain(
     requested_mode = str((body or {}).get("mode") or "step").strip().lower()
     run_mode = requested_mode if requested_mode in {"preview", "step", "autopilot"} else "step"
     stop_after_planning = bool((body or {}).get("_stop_after_planning"))
+    shot_indices = _normalize_continue_shot_indices((body or {}).get("shot_indices"))
+    selected_image = str((body or {}).get("selected_image") or (body or {}).get("candidate_url") or (body or {}).get("url") or "").strip()
+    artifact_id = str((body or {}).get("artifact_id") or "").strip()
     current_brain = build_project_brain(
         project_id,
         name=str(row.name if row else project_id),
@@ -1135,7 +1152,7 @@ async def continue_project_brain(
     )
     # 优先使用后端实时计算的 next_action，除非前端明确请求的 action 与当前一致
     brain_action = str(current_brain.get("next_action") or "")
-    action = brain_action if brain_action else (requested_action or "")
+    action = requested_action or brain_action
     gate_tasks = await _fetch_project_tasks_for_agent_gate(db, project_id=project_id, user_id=user_id)
     gate = evaluate_action_gate(action, shots=operational_shots, tasks=gate_tasks)
     if not requested_action and action and not gate.get("allowed", True):
@@ -1223,6 +1240,11 @@ async def continue_project_brain(
             "after": current_brain,
         }
     if action in {"generate_keyframes", "plan_visual_assets", "generate_videos", "plan_final_edit"}:
+        director_protocol = (body or {}).get("director_input_protocol")
+        _guard_director_protocol_next_step(
+            action,
+            director_protocol if isinstance(director_protocol, dict) else None,
+        )
         try:
             return await _dispatch_production_action(
                 db,
@@ -1237,10 +1259,20 @@ async def continue_project_brain(
                 result={"project_id": project_id, "before": current_brain},
                 image_unit_price=image_unit_price,
                 video_unit_price=video_unit_price,
-                provider=str((body or {}).get("video_provider") or "ltx2.3"),
+                provider=str((body or {}).get("video_provider") or "joy-echo"),
+                shot_indices=shot_indices,
+                selected_image=selected_image,
+                artifact_id=artifact_id,
                 semantic_control={
                     key: (body or {}).get(key)
-                    for key in ("intent_brief", "semantic_plan", "constraint_packet", "verification_plan", "human_routing")
+                    for key in (
+                        "intent_brief",
+                        "semantic_plan",
+                        "constraint_packet",
+                        "verification_plan",
+                        "human_routing",
+                        "director_input_protocol",
+                    )
                 },
             )
         except Exception as exc:
@@ -1429,6 +1461,9 @@ async def continue_project_brain(
                 run_id=run_id, run_mode=run_mode, result=result,
                 image_unit_price=image_unit_price,
                 video_unit_price=video_unit_price,
+                shot_indices=shot_indices,
+                selected_image=selected_image,
+                artifact_id=artifact_id,
             )
         await update_agent_run(
             db, run_id=run_id, status="completed", current_phase="writeback_review",
@@ -1471,6 +1506,52 @@ def _dispatch_action_after_planning(after_brain: dict[str, Any], after_action: s
     return ""
 
 
+def _normalize_continue_shot_indices(raw_indices: Any) -> list[int] | None:
+    if not raw_indices:
+        return None
+    if not isinstance(raw_indices, (list, tuple, set)):
+        raise HTTPException(status_code=400, detail="shot_indices must be a list")
+    try:
+        indices = sorted({int(idx) for idx in raw_indices})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="shot_indices must be integers") from exc
+    if any(idx <= 0 for idx in indices):
+        raise HTTPException(status_code=400, detail="shot_indices must be positive")
+    return indices
+
+
+async def _resolve_continue_selected_image(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    user_id: int,
+    selected_image: str = "",
+    artifact_id: str = "",
+) -> str:
+    if selected_image:
+        return selected_image
+    if not artifact_id:
+        return ""
+    result = await db.execute(
+        text(
+            """
+            SELECT uri
+            FROM agent_artifacts
+            WHERE id = CAST(:artifact_id AS UUID)
+              AND project_id = :project_id
+              AND user_id = :user_id
+              AND artifact_type IN ('image', 'keyframe', 'reference_image')
+            LIMIT 1
+            """
+        ),
+        {"artifact_id": artifact_id, "project_id": project_id, "user_id": user_id},
+    )
+    row = result.mappings().first()
+    if row and str(row.get("uri") or "").strip():
+        return str(row.get("uri") or "").strip()
+    raise HTTPException(status_code=400, detail="candidate image not found in keyframe pool")
+
+
 def _should_continue_planning_chain(
     *,
     run_mode: str,
@@ -1501,7 +1582,7 @@ def _build_compatibility_decision_packet(
     before: dict[str, Any],
     image_unit_price: int,
     video_unit_price: int,
-    provider: str = "ltx2.3",
+    provider: str = "joy-echo",
 ) -> DecisionTickResult:
     signals = before.get("signals") if isinstance(before.get("signals"), dict) else {}
     lane = {
@@ -1644,13 +1725,26 @@ _VALID_PRODUCTION_ACTIONS = {
 
 def _resolve_authoritative_dispatch_action(action: str, packet: DecisionTickResult) -> tuple[str, bool]:
     """Return the action to dispatch and whether the decision packet is compatible."""
+    executable = packet.status == "execute" and packet.dispatchable and packet.allowed
     if packet.action == action:
+        return action, executable
+    if _REVIEW_TO_GENERATE_ACTION.get(packet.action) == action and executable:
         return action, True
-    if _REVIEW_TO_GENERATE_ACTION.get(packet.action) == action:
-        return action, True
-    if packet.action in _VALID_PRODUCTION_ACTIONS and packet.status == "execute":
+    if packet.action in _VALID_PRODUCTION_ACTIONS and executable:
         return packet.action, True
     return action, False
+
+
+def _is_manual_visual_asset_dispatch(action: str, semantic_control: dict[str, Any] | None) -> bool:
+    if action != "plan_visual_assets" or not isinstance(semantic_control, dict):
+        return False
+    routing = semantic_control.get("human_routing")
+    if not isinstance(routing, dict):
+        return False
+    return (
+        str(routing.get("routing_source") or "") == "manual_selector"
+        and str(routing.get("explicit_action") or "") == action
+    )
 
 
 async def _dispatch_production_action(
@@ -1667,7 +1761,10 @@ async def _dispatch_production_action(
     result: dict[str, Any],
     image_unit_price: int,
     video_unit_price: int,
-    provider: str = "ltx2.3",
+    provider: str = "joy-echo",
+    shot_indices: list[int] | None = None,
+    selected_image: str = "",
+    artifact_id: str = "",
     semantic_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Route a production-stage action to its handler after planning loop completes."""
@@ -1684,7 +1781,19 @@ async def _dispatch_production_action(
         )
     else:
         packet = evaluate_decision_tick(facts)
-        action, compatible = _resolve_authoritative_dispatch_action(action, packet)
+        if _is_manual_visual_asset_dispatch(action, semantic_control):
+            packet = _build_compatibility_decision_packet(
+                project_id=project_id,
+                run_id=run_id,
+                action=action,
+                before=before,
+                image_unit_price=image_unit_price,
+                video_unit_price=video_unit_price,
+                provider=provider,
+            )
+            compatible = True
+        else:
+            action, compatible = _resolve_authoritative_dispatch_action(action, packet)
         if not compatible:
             # Allow review→generate compatibility
             if False:
@@ -1693,12 +1802,7 @@ async def _dispatch_production_action(
             elif packet.status == "blocked":
                 # Gate recovery: when the state machine blocks, find what action
                 # would unblock the gate and redirect to it.
-                from app.services.agent_run_state_machine import _gate_recovery
-                recovery = _gate_recovery({
-                    "action": packet.action,
-                    "status": packet.status,
-                    "gate": {"missing": packet.missing},
-                })
+                recovery = str(packet.fallback_action or "")
                 if recovery and recovery in _VALID_PRODUCTION_ACTIONS:
                     action = recovery
                     # Re-evaluate to get an updated packet for this action
@@ -1740,6 +1844,7 @@ async def _dispatch_production_action(
             user_tier=user_tier,
             before=before,
             run_id=run_id,
+            shot_indices=shot_indices,
             semantic_control=semantic_control,
         ),
         "plan_visual_assets": lambda: _continue_plan_visual_assets(
@@ -1758,6 +1863,9 @@ async def _dispatch_production_action(
             before=before,
             run_id=run_id,
             provider=provider,
+            shot_indices=shot_indices,
+            selected_image=selected_image,
+            artifact_id=artifact_id,
             semantic_control=semantic_control,
         ),
         "plan_final_edit": lambda: _continue_plan_final_edit(
@@ -1805,10 +1913,17 @@ def _runtime_features_for_production_action(action: str) -> list[str]:
 def _provider_capabilities_for_production_action(action: str, *, provider: str = "") -> list[str]:
     if action == "generate_videos":
         p = str(provider or "").strip().lower()
+        if p in {"joy-echo", "joy_echo", "joyai-echo", "joyai_echo"}:
+            return ["joy_echo_image_to_video"]
+        if p in {"ltx2.3", "ltx"}:
+            return ["ltx23_image_to_video"]
+        if p in {"wan", "wan2.1", "wan2_1", "comfyui"}:
+            return ["ltx_image_to_video"]
         if p == "seedance":
             return ["seedance_image_to_video"]
-        # LTX / legacy Wan / ComfyUI are image-to-video providers.
-        return ["seedance_image_to_video"]
+        if p == "kling":
+            return ["kling_image_to_video"]
+        return ["ltx23_image_to_video"]
     return []
 
 
@@ -2200,7 +2315,21 @@ def _keyframe_generation_targets(
             and _signed_media_url_expired(str(r.get("selected_image") or ""))
             and str(r.get("status") or "") not in {"generating_image", "generating_video", "video_done"}
         ]
-        return missing + expired
+        review_failed = [
+            {
+                **r,
+                "regeneration": {
+                    "reason": "image_review_blockers",
+                    "recommendation": "regenerate_review_failed_keyframes",
+                    "previous_selected_image": r.get("selected_image") or "",
+                },
+            }
+            for r in rows
+            if r.get("prompt") and r.get("selected_image")
+            and str(r.get("status") or "") not in {"generating_image", "generating_video", "video_done"}
+            and _image_review_status(r) in {"needs_review", "regenerate", "failed", "fail", "rejected", "blocked"}
+        ]
+        return missing + expired + review_failed
     shot_indices = {_safe_int(item) for item in repair.get("shot_indices") or [] if _safe_int(item) > 0}
     targets: list[dict[str, Any]] = []
     for row in rows:
@@ -2302,6 +2431,9 @@ async def _continue_generate_batch(
     run_id: str | None = None,
     media_type: str,
     provider: str = "seedream",
+    shot_indices: list[int] | None = None,
+    selected_image: str = "",
+    artifact_id: str = "",
     semantic_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Unified batch generation for keyframes and videos.
@@ -2331,6 +2463,21 @@ async def _continue_generate_batch(
         {"project_id": project_id, "user_id": user_id},
     )
     rows = [_normalize_shot_row_row(item, project_id=project_id) for item in rows_result.fetchall()]
+    selected_image_override = ""
+    if is_video and shot_indices and len(shot_indices) == 1 and (selected_image or artifact_id):
+        selected_image_override = await _resolve_continue_selected_image(
+            db,
+            project_id=project_id,
+            user_id=user_id,
+            selected_image=selected_image,
+            artifact_id=artifact_id,
+        )
+        rows = [
+            {**row, "selected_image": selected_image_override}
+            if int(row.get("shot_index") or 0) == shot_indices[0]
+            else row
+            for row in rows
+        ]
 
     if is_video:
         generating = [r for r in rows if "generating" in str(r.get("status") or "") or "running" in str(r.get("status") or "")]
@@ -2343,6 +2490,10 @@ async def _continue_generate_batch(
         ]
     else:
         targets = _keyframe_generation_targets(rows, semantic_control=semantic_control)
+
+    if shot_indices:
+        requested = set(shot_indices)
+        targets = [r for r in targets if int(r.get("shot_index") or 0) in requested]
 
     if not targets:
         raise HTTPException(status_code=400, detail=f"No eligible shots for {media_type} generation")
@@ -2415,7 +2566,8 @@ async def _continue_generate_batch(
                 payload.update({key: value for key, value in semantic_control.items() if value is not None})
             if is_video:
                 payload["duration"] = row.get("duration") or 5
-                payload["image_url"] = row.get("selected_image") or ""
+                if provider not in TEXT_ONLY_VIDEO_PROVIDERS:
+                    payload["image_url"] = row.get("selected_image") or ""
             # Continuity: inject previous shot's output as reference for temporal coherence
             prev_shot = _shot_by_index.get(int(row["shot_index"]) - 1)
             if prev_shot:
@@ -2431,10 +2583,16 @@ async def _continue_generate_batch(
                  "payload": json.dumps({**payload, "_credit_transaction_id": transaction_ids[idx]}, ensure_ascii=False),
                  "credits": unit_price, "credit_transaction_id": transaction_ids[idx], "task_type": task_type},
             )
-            await db.execute(
-                text("UPDATE shot_rows SET status = :status, updated_at = NOW() WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index"),
-                {"status": status_generating, "project_id": project_id, "user_id": user_id, "shot_index": row["shot_index"]},
-            )
+            if is_video and selected_image_override and int(row["shot_index"]) == int(shot_indices[0]):
+                await db.execute(
+                    text("UPDATE shot_rows SET selected_image = :selected_image, status = :status, updated_at = NOW() WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index"),
+                    {"selected_image": selected_image_override, "status": status_generating, "project_id": project_id, "user_id": user_id, "shot_index": row["shot_index"]},
+                )
+            else:
+                await db.execute(
+                    text("UPDATE shot_rows SET status = :status, updated_at = NOW() WHERE project_id = :project_id AND user_id = :user_id AND shot_index = :shot_index"),
+                    {"status": status_generating, "project_id": project_id, "user_id": user_id, "shot_index": row["shot_index"]},
+                )
         await db.commit()
     except Exception:
         await db.rollback()
@@ -2461,7 +2619,8 @@ async def _continue_generate_batch(
                 deferred_payload.update({key: value for key, value in semantic_control.items() if value is not None})
             if is_video:
                 deferred_payload["duration"] = row.get("duration") or 5
-                deferred_payload["image_url"] = row.get("selected_image") or ""
+                if provider not in TEXT_ONLY_VIDEO_PROVIDERS:
+                    deferred_payload["image_url"] = row.get("selected_image") or ""
             deferred_payload = adapt_provider_payload(deferred_payload, task_type=task_type, provider=provider)
             pos = work_enqueue(
                 service=service,
@@ -2498,9 +2657,11 @@ async def _continue_generate_batch(
     operational_shots = [_normalize_shot_row_row(item, project_id=project_id) for item in refreshed.fetchall()]
     return {
         "project_id": project_id, "run_id": run_id, "applied": True, "action": action_name,
+        "status": "queued",
         "message": f"{media_type.title()} generation tasks queued.",
         "before": before, "after": build_project_brain(project_id, operational_shots=operational_shots),
         "parent_task_id": parent_task_id, "child_task_ids": child_task_ids,
+        "task_ids": child_task_ids, "task_id": child_task_ids[0] if child_task_ids else None,
         "queued_count": len(child_task_ids), "deferred_count": queued_count,
         "capacity": {
             "service": capacity.service,
@@ -2513,15 +2674,20 @@ async def _continue_generate_batch(
 
 
 async def _continue_generate_keyframes(
-    db: AsyncSession, *, project_id: str, user_id: int, user_tier: str, before: dict[str, Any], run_id: str | None = None, semantic_control: dict[str, Any] | None = None,
+    db: AsyncSession, *, project_id: str, user_id: int, user_tier: str, before: dict[str, Any],
+    run_id: str | None = None, shot_indices: list[int] | None = None,
+    semantic_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return await _continue_generate_batch(db, project_id=project_id, user_id=user_id, user_tier=user_tier, before=before, run_id=run_id, media_type="keyframe", semantic_control=semantic_control)
+    return await _continue_generate_batch(db, project_id=project_id, user_id=user_id, user_tier=user_tier, before=before, run_id=run_id, media_type="keyframe", shot_indices=shot_indices, semantic_control=semantic_control)
 
 
 async def _continue_generate_videos(
-    db: AsyncSession, *, project_id: str, user_id: int, user_tier: str, before: dict[str, Any], run_id: str | None = None, provider: str = "ltx2.3", semantic_control: dict[str, Any] | None = None,
+    db: AsyncSession, *, project_id: str, user_id: int, user_tier: str, before: dict[str, Any],
+    run_id: str | None = None, provider: str = "joy-echo", shot_indices: list[int] | None = None,
+    selected_image: str = "", artifact_id: str = "",
+    semantic_control: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return await _continue_generate_batch(db, project_id=project_id, user_id=user_id, user_tier=user_tier, before=before, run_id=run_id, media_type="video", provider=provider, semantic_control=semantic_control)
+    return await _continue_generate_batch(db, project_id=project_id, user_id=user_id, user_tier=user_tier, before=before, run_id=run_id, media_type="video", provider=provider, shot_indices=shot_indices, selected_image=selected_image, artifact_id=artifact_id, semantic_control=semantic_control)
 
 
     await _ensure_project_owner(db, project_id, user_id)
@@ -3038,6 +3204,75 @@ async def get_asset(
     if not row:
         raise HTTPException(status_code=404, detail="Asset not found")
     return _normalize_asset_row(row)
+
+
+@router.get("/{project_id}/assets/{aid}/file")
+async def get_asset_file(
+    project_id: str,
+    aid: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user["id"]
+    await _ensure_project_owner(db, project_id, user_id)
+    result = await db.execute(
+        text(
+            """
+            SELECT asset_type, file_path
+            FROM assets
+            WHERE asset_id = :aid AND project_id = :project_id AND user_id = :user_id AND status = 'active'
+            """
+        ),
+        {"aid": aid, "project_id": project_id, "user_id": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return _local_asset_file_response(row)
+
+
+@router.get("/{project_id}/assets/{aid}/public-file")
+async def get_public_asset_file(
+    project_id: str,
+    aid: str,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        text(
+            """
+            SELECT asset_type, file_path
+            FROM assets
+            WHERE asset_id = :aid AND project_id = :project_id AND status = 'active'
+            """
+        ),
+        {"aid": aid, "project_id": project_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return _local_asset_file_response(row)
+
+
+def _local_asset_file_response(row: Any) -> FileResponse:
+    path = Path(str(_row_value(row, "file_path") or "")).resolve()
+    try:
+        path.relative_to(STORAGE.resolve())
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Asset file not found") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Asset file not found")
+
+    content_type = mimetypes.guess_type(path.name)[0]
+    if not content_type and str(_row_value(row, "asset_type") or "") == "image":
+        content_type = "image/jpeg"
+    return FileResponse(path, media_type=content_type or "application/octet-stream")
+
+
+def _row_value(row: Any, key: str) -> Any:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return mapping[key]
+    return row[key]
 
 
 @router.post("/{project_id}/assets")

@@ -20,6 +20,8 @@ const props = defineProps<{ message: ChatMessage }>()
 
 const actorLabel = computed(() => {
   const actor = (props.message.actor || '').toLowerCase()
+  if (actor === 'joy-echo' || actor === 'joy_echo' || actor === 'joyai-echo' || actor === 'joyai_echo') return 'Joy-Echo'
+  if (actor === 'ltx2.3' || actor === 'ltx') return 'LTX 2.3'
   if (actor === 'seedance') return 'Seedance'
   if (actor === 'seedream') return 'Seedream'
   return actor || 'Provider'

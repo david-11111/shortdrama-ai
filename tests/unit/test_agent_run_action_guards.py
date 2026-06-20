@@ -1143,6 +1143,105 @@ async def test_continue_step_execute_phrase_confirms_saved_pending_action(monkey
 
 
 @pytest.mark.asyncio
+async def test_state_machine_recovery_returns_generate_keyframes_body(monkeypatch):
+    agent_runs = _load_agent_runs(monkeypatch)
+    production_state = {
+        "shots": [
+            {
+                "shot_index": 1,
+                "prompt": "shot",
+                "selected_image": "https://cdn.test/shot-1.png",
+                "selected_video": "",
+                "image_candidates": [
+                    {"url": "https://cdn.test/shot-1.png", "review_status": "regenerate"}
+                ],
+            }
+        ],
+        "tasks": [],
+        "production_run": None,
+    }
+    monkeypatch.setattr(agent_runs, "_run_production_state", AsyncMock(return_value=production_state))
+
+    continue_body, routing = await agent_runs._apply_state_machine_recovery_routing(
+        object(),
+        {"instruction": "continue"},
+        {
+            "instruction": "continue",
+            "intent_type": "production_action",
+            "action_ceiling": "execute_allowed",
+            "utterance_type": "command",
+            "planner": {
+                "action": "generate_keyframes",
+                "intent_type": "production_action",
+                "dispatch_ready": False,
+            },
+        },
+        run_id="run-1",
+        project_id="project-1",
+        user_id=7,
+    )
+
+    assert continue_body["action"] == "generate_keyframes"
+    assert continue_body["continue_action"] == "generate_keyframes"
+    assert routing["routing_source"] == "state_machine_recovery"
+    assert routing["resolved_action"] == "generate_keyframes"
+    assert routing["state_machine_recovery"]["missing"] == ["image_review_blockers"]
+
+
+@pytest.mark.asyncio
+async def test_review_blocker_recovery_dispatches_regenerate_keyframes(monkeypatch):
+    agent_runs = _load_agent_runs(monkeypatch)
+    production_state = {
+        "shots": [
+            {
+                "shot_index": 1,
+                "prompt": "shot",
+                "selected_image": "https://cdn.test/shot-1.png",
+                "selected_video": "",
+                "image_candidates": [
+                    {
+                        "url": "https://cdn.test/shot-1.png",
+                        "review_status": "regenerate",
+                        "review": {"missing_reference_assets": ["character"]},
+                    }
+                ],
+            }
+        ],
+        "tasks": [],
+        "production_run": None,
+    }
+    save_pending = AsyncMock()
+    monkeypatch.setattr(agent_runs, "_run_production_state", AsyncMock(return_value=production_state))
+    monkeypatch.setattr(agent_runs, "_save_pending_action", save_pending)
+
+    continue_body, routing = await agent_runs._apply_review_blocker_clarification_routing(
+        object(),
+        {
+            "instruction": "continue",
+            "action": "generate_keyframes",
+            "continue_action": "generate_keyframes",
+        },
+        {
+            "instruction": "continue",
+            "resolved_action": "generate_keyframes",
+            "routing_source": "state_machine_recovery",
+            "intent_type": "production_action",
+            "action_ceiling": "execute_allowed",
+        },
+        run_id="run-1",
+        project_id="project-1",
+        user_id=7,
+    )
+
+    assert continue_body["action"] == "generate_keyframes"
+    assert continue_body["continue_action"] == "generate_keyframes"
+    assert continue_body["shot_indices"] == [1]
+    assert routing["resolved_action"] == "generate_keyframes"
+    assert routing["review_blocker_clarification"]["proposal"]["recommendation"] == "regenerate_review_failed_keyframes"
+    save_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_continue_step_confirm_approves_review_pending_keyframes_before_video(monkeypatch):
     agent_runs = _load_agent_runs(monkeypatch)
 

@@ -14,7 +14,7 @@ HUMAN_DIRECT_EXECUTABLE_ACTIONS: set[str] = {
     "status_query",
 }
 
-HUMAN_EXECUTABLE_ACTIONS = HUMAN_REQUESTABLE_ACTIONS
+HUMAN_EXECUTABLE_ACTIONS = HUMAN_REQUESTABLE_ACTIONS | {"skip_shot"}
 
 CAPABILITY_REGISTRY: dict[str, dict] = {
     "status_query": {
@@ -187,6 +187,7 @@ NON_DISPATCH_RECOMMENDATIONS: set[str] = {
     "refresh_asset_urls",
     "wait_active_tasks",
     "change_provider",
+    "skip_shot",
     "inspect_keyframe_pool",
     "expand_shot_to_keyframe_prompts",
     "select_keyframe_candidate",

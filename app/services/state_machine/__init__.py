@@ -27,6 +27,7 @@ from app.services.state_machine.evaluator import (
     evaluate_action_gate,
     evaluate_production_stages,
     recommend_next_action,
+    should_escalate,
 )
 from app.services.state_machine.intent import (
     infer_continue_action,
@@ -46,4 +47,5 @@ __all__ = [
     "recommend_next_action",
     "infer_continue_action",
     "infer_continue_action_decision",
+    "should_escalate",
 ]

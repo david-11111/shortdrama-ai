@@ -3,7 +3,7 @@ import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTaskPoller } from '@/composables/useTaskPoller'
 import { directorExportFinal, directorProduce, normalizeMediaUrl } from '@/api/director'
-import { applyShotSafeRewrite, batchGenerateImages, batchGenerateVideos, listShotRows, rollbackShotSafeRewrite } from '@/api/workbench'
+import { applyShotSafeRewrite, continueProjectBrain, listShotRows, rollbackShotSafeRewrite } from '@/api/workbench'
 import type { MediaCandidate, MediaReview, PromptRevisionPayload, Shot } from '@/composables/useDirectorSession'
 import {
   deriveShotProductionState as deriveUnifiedShotProductionState,
@@ -13,7 +13,6 @@ const session = inject<any>('session')
 const router = useRouter()
 const pollingShots = ref(false)
 const autoPolling = ref(false)
-const imageBatchCount = ref(1)
 const exportingFinal = ref(false)
 const exportProgress = ref(0)
 const exportStage = ref('')
@@ -430,24 +429,25 @@ function trackTask(taskId: string, onComplete?: (result: any, status: string) =>
   }, 200)
 }
 
+function continueTaskIds(data: any): string[] {
+  const ids = Array.isArray(data?.child_task_ids)
+    ? data.child_task_ids
+    : Array.isArray(data?.task_ids)
+      ? data.task_ids
+      : data?.task_id
+        ? [data.task_id]
+        : []
+  return ids.map((id: unknown) => String(id || '').trim()).filter(Boolean)
+}
+
 async function batchImages() {
   if (!session.projectId.value) return
   if (!session.shots.value.length) return
   productionError.value = ''
   if (!ensureNoBlockedShots()) return
-  const count = Math.max(1, Math.min(6, Number(imageBatchCount.value || 1)))
-  const items = session.shots.value.flatMap((s: Shot) => {
-    const base = {
-      shot_row: { project_id: session.projectId.value, prompt: s.prompt, duration: s.duration, shot_index: s.index },
-      provider: 'seedream',
-    }
-    return Array.from({ length: count }, () => ({ ...base }))
-  })
   try {
-    const { data } = await batchGenerateImages({ items, provider: 'seedream' })
-    if (Array.isArray(data?.child_task_ids)) {
-      data.child_task_ids.forEach((id: string) => trackTask(id))
-    }
+    const { data } = await continueProjectBrain(session.projectId.value, { action: 'generate_keyframes' })
+    continueTaskIds(data).forEach((id) => trackTask(id))
   } catch (error: any) {
     productionError.value = formatApiError(error)
   }
@@ -462,52 +462,19 @@ async function produceOneImage(shot: Shot) {
     return
   }
   try {
-    const { data } = await batchGenerateImages({
-      items: [{
-        shot_row: {
-          project_id: session.projectId.value,
-          prompt: shot.prompt,
-          duration: shot.duration,
-          shot_index: shot.index,
-        },
-        provider: 'seedream',
-      }],
-      provider: 'seedream',
+    const { data } = await continueProjectBrain(session.projectId.value, {
+      action: 'generate_keyframes',
+      instruction: `generate keyframe for shot #${shot.index}`,
+      shot_indices: [shot.index],
     })
-    if (Array.isArray(data?.child_task_ids)) {
-      data.child_task_ids.forEach((id: string) => trackTask(id))
-    }
+    continueTaskIds(data).forEach((id) => trackTask(id))
   } catch (error: any) {
     productionError.value = formatApiError(error)
   }
 }
 
 async function batchVideos() {
-  if (!session.projectId.value) return
-  if (!session.shots.value.length) return
-  productionError.value = ''
-  if (!ensureNoBlockedShots()) return
-  const items = session.shots.value
-    .filter((s: Shot) => s.selected_image)
-    .map((s: Shot) => ({
-      shot_row: {
-        project_id: session.projectId.value,
-        prompt: s.prompt,
-        duration: s.duration,
-        shot_index: s.index,
-        selected_image: s.selected_image,
-      },
-      provider: 'seedance',
-    }))
-  if (!items.length) return
-  try {
-    const { data } = await batchGenerateVideos({ items, provider: 'seedance' })
-    if (Array.isArray(data?.child_task_ids)) {
-      data.child_task_ids.forEach((id: string) => trackTask(id))
-    }
-  } catch (error: any) {
-    productionError.value = formatApiError(error)
-  }
+  await produceVideosOnly()
 }
 
 async function produceVideosOnly() {
@@ -523,7 +490,7 @@ async function produceVideosOnly() {
       project_id: session.projectId.value,
       shot_indices: shotIndices,
       skip_images: true,
-      provider: 'seedance',
+      provider: 'joy-echo',
       anchor_locks: { ...session.anchorLocks.value },
     })
     if (data?.task_id) {
@@ -541,7 +508,7 @@ async function produce() {
   try {
     const { data } = await directorProduce({
       project_id: session.projectId.value,
-      provider: 'seedance',
+      provider: 'joy-echo',
       anchor_locks: { ...session.anchorLocks.value },
     })
     if (data?.task_id) {
@@ -565,7 +532,7 @@ async function produceOneVideo(shot: Shot) {
       project_id: session.projectId.value,
       shot_indices: [shot.index],
       skip_images: true,
-      provider: 'seedance',
+      provider: 'joy-echo',
       anchor_locks: { ...session.anchorLocks.value },
     })
     if (data?.task_id) {
@@ -720,11 +687,6 @@ onUnmounted(() => {
         <span>⊞</span>
         <b>全部分镜出图</b>
       </button>
-      <label class="count-label">
-        <span>每条</span>
-        <input v-model.number="imageBatchCount" type="number" min="1" max="6" />
-        <span>张</span>
-      </label>
       <button class="tool-btn transition-all" type="button" :disabled="!session.shots.value.some((s: Shot) => s.selected_image)" @click="batchVideos">
         <span>▶</span>
         <b>已选图批量视频</b>
@@ -738,7 +700,7 @@ onUnmounted(() => {
         <b>全流程生产（图+视频）</b>
       </button>
     </div>
-    <p class="toolbar-hint">参考图在左侧“参考图 > 生成参考图”；“全流程生产”=先出图再出视频；如果你已绑好参考图，直接用“仅视频生产”或卡片内“单条视频”。当前批量出图会按“每条 N 张”执行。</p>
+    <p class="toolbar-hint">参考图在左侧“参考图 > 生成参考图”；“全流程生产”=先出图再出视频；如果你已绑好参考图，直接用“仅视频生产”或卡片内“单条视频”。</p>
 
     <p v-if="productionError" class="shot-error production-error">{{ productionError }}</p>
 
@@ -1112,34 +1074,6 @@ h3 {
 .tool-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
-}
-
-.count-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.32rem;
-  font-size: 0.75rem;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
-  height: 34px;
-  padding: 0 0.5rem;
-}
-
-.count-label input {
-  width: 44px;
-  height: 24px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-bg-secondary);
-  color: var(--color-text);
-  text-align: center;
-}
-
-.count-label input:focus {
-  outline: none;
-  border-color: var(--color-primary);
 }
 
 .toolbar-hint {

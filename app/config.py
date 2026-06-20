@@ -79,8 +79,28 @@ class Settings(BaseSettings):
     comfyui_api_key: str = ""
     ltx_api_base_url: str = ""
     ltx_api_key: str = ""
+    joy_echo_api_base_url: str = ""
+    joy_echo_api_key: str = ""
     inference_api_base_url: str = "http://127.0.0.1:8100"
     inference_api_key: str = "sk-default-dev-key"
+    joy_echo_ssh_host: str = ""
+    joy_echo_ssh_port: int = 22
+    joy_echo_ssh_user: str = "root"
+    joy_echo_ssh_password: str = ""
+    joy_echo_repo_path: str = "/root/autodl-tmp/joyai/JoyAI-Echo/JoyAI-Echo-code"
+    joy_echo_python_path: str = "/root/autodl-tmp/joyai/envs/echo-long/bin/python"
+    joy_echo_output_root: str = "inference_result/outputs"
+    joy_echo_video_width: int = 1280
+    joy_echo_video_height: int = 736
+    joy_echo_fps: int = 25
+    joy_echo_default_seed: int = 20260625
+    joy_echo_timeout_seconds: int = 7200
+
+    # LTX Desktop (本地 GPU 视频/图片生成)
+    ltx_desktop_install_path: str = r"D:\Users\福星1号\AppData\Local\Programs\LTX Desktop"
+    ltx_desktop_data_dir: str = ""
+    ltx_desktop_auto_launch: bool = True
+    ltx_desktop_api_base_url: str = "http://127.0.0.1:41954"
 
     model_config = SettingsConfigDict(
         env_file=".env",

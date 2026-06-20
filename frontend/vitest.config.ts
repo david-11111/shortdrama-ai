@@ -7,12 +7,12 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    include: ['frontend/tests/**/*.{test,spec}.ts'],
-    reporters: ['verbose', ['html', { outputFile: 'tests/reports/vitest/index.html' }]],
+    include: ['tests/**/*.{test,spec}.ts'],
+    reporters: ['verbose'],
   },
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./frontend/src', import.meta.url)),
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
 })

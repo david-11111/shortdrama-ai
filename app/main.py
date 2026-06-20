@@ -179,12 +179,34 @@ async def global_exception_handler(request: Request, exc: Exception):
 # --- Lifecycle ---
 @app.on_event("startup")
 async def on_startup():
-    logger.info("ShortDrama AI SaaS API starting 鈥?env=%s debug=%s", settings.app_env, settings.app_debug)
+    logger.info("ShortDrama AI SaaS API starting - env=%s debug=%s", settings.app_env, settings.app_debug)
+
+    # Auto-launch LTX Desktop backend if configured
+    if settings.ltx_desktop_auto_launch and settings.ltx_desktop_install_path:
+        try:
+            from app.services.ltx_desktop import LtxDesktopService
+            service = LtxDesktopService()
+            if service.health().get("status") != "ok":
+                logger.info("LTX Desktop backend not running, attempting auto-launch...")
+                import threading
+                threading.Thread(target=service.ensure_running, daemon=True).start()
+            else:
+                logger.info("LTX Desktop backend is already running")
+        except Exception as exc:
+            logger.warning("LTX Desktop auto-launch skipped (non-fatal): %s", exc)
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("ShortDrama AI SaaS API shutting down")
+
+    # Gracefully shut down LTX Desktop backend if we launched it
+    try:
+        from app.services.ltx_desktop import LtxDesktopService
+        LtxDesktopService().shutdown()
+    except Exception as exc:
+        logger.warning("LTX Desktop shutdown (non-fatal): %s", exc)
+
     try:
         await redis_client.close()
         await redis_client.connection_pool.disconnect()
@@ -213,7 +235,8 @@ async def batch_generate_videos(
     """
     瀹屾暣娴佺▼: 閴存潈 鈫?骞跺彂妫€鏌?鈫?闄愭祦妫€鏌?鈫?绉垎棰勬墸 鈫?娲惧彂浠诲姟
     """
-    await guard_infrastructure_preflight("video_gen")
+    video_provider = str(payload.get("provider") or "joy-echo").strip().lower()
+    await guard_infrastructure_preflight("video_gen", provider=video_provider)
     user_id = current_user["id"]
     user_tier = current_user["tier"]
     items = _extract_batch_items(payload)
@@ -236,7 +259,7 @@ async def batch_generate_videos(
 
     def _video_payload(item: dict, _index: int) -> dict:
         task_payload = dict(item)
-        task_payload.setdefault("provider", payload.get("provider", "ltx2.3"))
+        task_payload.setdefault("provider", video_provider)
         return task_payload
 
     submission = await submit_batch_tasks(

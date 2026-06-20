@@ -7,6 +7,87 @@ from app.services.llm_planner import PlannerDecision
 
 
 @pytest.mark.asyncio
+async def test_stream_run_events_sends_done_for_completed_run_without_redis(monkeypatch):
+    async def fake_user_id_from_stream_token(token: str) -> int:
+        return 7
+
+    async def fake_ensure_run_owner(db, *, run_id: str, user_id: int) -> str:
+        return "project-1"
+
+    async def fake_list_project_agent_events(*args, **kwargs) -> list[dict]:
+        return []
+
+    async def fake_get_run_status(db, *, run_id: str, user_id: int) -> str:
+        return "completed"
+
+    class NoRedis:
+        @classmethod
+        def from_url(cls, *args, **kwargs):
+            raise AssertionError("terminal stream should not subscribe to redis")
+
+    monkeypatch.setattr(agent_runs, "_user_id_from_stream_token", fake_user_id_from_stream_token)
+    monkeypatch.setattr(agent_runs, "_ensure_run_owner", fake_ensure_run_owner)
+    monkeypatch.setattr(agent_runs, "list_project_agent_events", fake_list_project_agent_events)
+    monkeypatch.setattr(agent_runs, "_get_run_status", fake_get_run_status)
+    monkeypatch.setattr(agent_runs, "aioredis", type("FakeAioredis", (), {"Redis": NoRedis}))
+
+    response = await agent_runs.stream_run_events("run-1", token="token", db=object())
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+
+    assert "event: stream_ready" in body
+    assert 'data: {"run_id": "run-1", "project_id": "project-1", "status": "completed"}' in body
+    assert "event: stream_done" in body
+
+
+@pytest.mark.asyncio
+async def test_stream_run_events_filters_debug_events_from_execution_stream(monkeypatch):
+    async def fake_user_id_from_stream_token(token: str) -> int:
+        return 7
+
+    async def fake_ensure_run_owner(db, *, run_id: str, user_id: int) -> str:
+        return "project-1"
+
+    async def fake_list_project_agent_events(*args, **kwargs) -> list[dict]:
+        return [
+            {
+                "id": "debug-event",
+                "phase": "decision_tick",
+                "event_type": "decision",
+                "visibility": "debug",
+                "summary": "debug details",
+                "created_at": "2026-06-15T00:00:00Z",
+            },
+            {
+                "id": "user-event",
+                "phase": "created",
+                "event_type": "trace",
+                "visibility": "user",
+                "summary": "visible event",
+                "created_at": "2026-06-15T00:00:01Z",
+            },
+        ]
+
+    async def fake_get_run_status(db, *, run_id: str, user_id: int) -> str:
+        return "completed"
+
+    monkeypatch.setattr(agent_runs, "_user_id_from_stream_token", fake_user_id_from_stream_token)
+    monkeypatch.setattr(agent_runs, "_ensure_run_owner", fake_ensure_run_owner)
+    monkeypatch.setattr(agent_runs, "list_project_agent_events", fake_list_project_agent_events)
+    monkeypatch.setattr(agent_runs, "_get_run_status", fake_get_run_status)
+
+    response = await agent_runs.stream_run_events("run-1", token="token", db=object())
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+
+    assert "user-event" in body
+    assert "debug-event" not in body
+    assert '"visibility": "debug"' not in body
+
+
+@pytest.mark.asyncio
 async def test_story_plan_writeback_refreshes_run_ledger_and_brain_steps(monkeypatch):
     executed: list[tuple[str, dict]] = []
     emitted: dict[str, object] = {}
@@ -314,6 +395,15 @@ def test_pending_action_confirmation_cannot_be_overridden_by_planner_or_control_
     assert _apply_control_intent_routing(body, routing) == (body, routing)
 
 
+def test_ascii_continue_confirms_pending_action():
+    _, routing = _build_human_continue_body(
+        {"instruction": "continue"},
+        source_run_id="run-1",
+    )
+
+    assert agent_runs._should_confirm_pending_action(routing) is True
+
+
 def test_build_keyframe_review_repair_proposal_from_blocked_shots():
     proposal = agent_runs._build_keyframe_review_repair_proposal(
         [
@@ -427,10 +517,13 @@ def test_video_duration_maps_to_billing_operation():
     assert agent_runs._bounded_video_duration(10, default=5) == 10
     assert agent_runs._bounded_video_duration(11, default=5) == 15
     assert agent_runs._bounded_video_duration(15, default=5) == 15
+    assert agent_runs._bounded_video_duration(60, default=5) == 60
+    assert agent_runs._bounded_video_duration(360, default=5) == 300
     assert agent_runs._video_operation_for_duration(5) == "video_gen_5s"
     assert agent_runs._video_operation_for_duration(8) == "video_gen_8s"
     assert agent_runs._video_operation_for_duration(10) == "video_gen_10s"
     assert agent_runs._video_operation_for_duration(15) == "video_gen_15s"
+    assert agent_runs._video_operation_for_duration(60) == "video_gen_long"
 
 
 @pytest.mark.asyncio
@@ -452,6 +545,119 @@ async def test_generate_video_from_pool_rejects_unverified_multi_image_mode(monk
 
     assert exc.value.status_code == 400
     assert exc.value.detail["supported_modes"] == ["best_single"]
+
+
+@pytest.mark.asyncio
+async def test_generate_keyframe_batch_routes_through_project_brain(monkeypatch):
+    observed: dict[str, object] = {}
+
+    async def fake_ensure_run_owner(_db, *, run_id, user_id):
+        assert run_id == "run-1"
+        assert user_id == 7
+        return "project-1"
+
+    async def fake_continue_project_brain(project_id: str, body: dict, db, current_user: dict) -> dict:
+        observed["project_id"] = project_id
+        observed["body"] = body
+        observed["current_user"] = current_user
+        return {
+            "run_id": "run-2",
+            "status": "queued",
+            "action": body["action"],
+            "parent_task_id": "parent-1",
+            "child_task_ids": ["task-1", "task-2"],
+            "queued_count": 2,
+            "deferred_count": 0,
+            "total_credits_reserved": 20,
+        }
+
+    async def fail_direct_reserve(*args, **kwargs):
+        raise AssertionError("agent-run keyframe batch must not reserve credits directly")
+
+    monkeypatch.setattr(agent_runs, "_ensure_run_owner", fake_ensure_run_owner)
+    monkeypatch.setattr(agent_runs, "continue_project_brain", fake_continue_project_brain)
+    monkeypatch.setattr(agent_runs, "reserve_credits", fail_direct_reserve)
+
+    result = await agent_runs.generate_keyframe_batch(
+        "run-1",
+        {"shot_index": 3, "count": 2, "variation_strategy": "angle"},
+        db=object(),
+        current_user={"id": 7, "tier": "pro"},
+    )
+
+    body = observed["body"]
+    assert result["result_run_id"] == "run-2"
+    assert result["parent_task_id"] == "parent-1"
+    assert result["child_task_ids"] == ["task-1", "task-2"]
+    assert result["task_ids"] == ["task-1", "task-2"]
+    assert result["task_id"] == "task-1"
+    assert result["queued_count"] == 2
+    assert result["estimated_credits"] == 20
+    assert result["result"]["action"] == "generate_keyframes"
+    assert body["action"] == "generate_keyframes"
+    assert body["shot_indices"] == [3]
+    assert body["source_run_id"] == "run-1"
+    assert body["keyframe_pool_batch"] is True
+
+
+@pytest.mark.asyncio
+async def test_generate_video_from_pool_routes_through_project_brain(monkeypatch):
+    observed: dict[str, object] = {}
+
+    async def fake_ensure_run_owner(_db, *, run_id, user_id):
+        assert run_id == "run-1"
+        assert user_id == 7
+        return "project-1"
+
+    async def fake_continue_project_brain(project_id: str, body: dict, db, current_user: dict) -> dict:
+        observed["project_id"] = project_id
+        observed["body"] = body
+        observed["current_user"] = current_user
+        return {
+            "run_id": "run-2",
+            "status": "queued",
+            "action": body["action"],
+            "parent_task_id": "parent-1",
+            "child_task_ids": ["task-1"],
+            "queued_count": 1,
+            "deferred_count": 0,
+            "total_credits_reserved": 60,
+        }
+
+    async def fail_direct_reserve(*args, **kwargs):
+        raise AssertionError("agent-run video-from-pool must not reserve credits directly")
+
+    monkeypatch.setattr(agent_runs, "_ensure_run_owner", fake_ensure_run_owner)
+    monkeypatch.setattr(agent_runs, "continue_project_brain", fake_continue_project_brain)
+    monkeypatch.setattr(agent_runs, "reserve_credits", fail_direct_reserve)
+
+    result = await agent_runs.generate_video_from_pool(
+        "run-1",
+        {
+            "shot_index": 3,
+            "candidate_url": "https://cdn.test/keyframe.png",
+            "artifact_id": "artifact-1",
+            "duration": 15,
+        },
+        db=object(),
+        current_user={"id": 7, "tier": "pro"},
+    )
+
+    body = observed["body"]
+    assert result["result_run_id"] == "run-2"
+    assert result["parent_task_id"] == "parent-1"
+    assert result["child_task_ids"] == ["task-1"]
+    assert result["task_ids"] == ["task-1"]
+    assert result["task_id"] == "task-1"
+    assert result["queued_count"] == 1
+    assert result["estimated_credits"] == 60
+    assert result["result"]["action"] == "generate_videos"
+    assert body["action"] == "generate_videos"
+    assert body["shot_indices"] == [3]
+    assert body["video_provider"] == "joy-echo"
+    assert body["selected_image"] == "https://cdn.test/keyframe.png"
+    assert body["source_run_id"] == "run-1"
+    assert body["keyframe_pool_video"] is True
 
 
 @pytest.mark.asyncio
@@ -632,20 +838,24 @@ async def test_create_run_action_takes_priority_over_autopilot_mode(monkeypatch)
 @pytest.mark.asyncio
 async def test_create_run_production_run_routes_empty_project_to_story_plan_without_stopping_chain(monkeypatch):
     called: dict[str, str] = {}
+    storyboard_checks = 0
 
     async def fake_owner(db, *, project_id: str, user_id: int) -> None:
         called["owner"] = project_id
 
     async def fake_has_storyboard(db, *, project_id: str, user_id: int) -> bool:
+        nonlocal storyboard_checks
+        storyboard_checks += 1
         called["checked_project"] = project_id
-        return False
+        return storyboard_checks > 1
 
     async def fake_start_video_production(project_id: str, body: dict, db, current_user: dict) -> dict:
-        called["branch"] = "production_run"
-        return {"agent_run_id": "run-video", "status": "queued"}
+        called["production_branch"] = "production_run"
+        called["production_goal"] = body["goal"]
+        return {"agent_run_id": "run-video", "status": "queued", "task_id": "task-video", "production_run_id": "prod-1"}
 
     async def fake_continue_project_brain(project_id: str, body: dict, db, current_user: dict) -> dict:
-        called["branch"] = "continue_project"
+        called["planning_branch"] = "continue_project"
         called["action"] = body["action"]
         called["instruction"] = body["instruction"]
         called["stop_after_planning"] = str(body.get("_stop_after_planning"))
@@ -662,32 +872,43 @@ async def test_create_run_production_run_routes_empty_project_to_story_plan_with
         current_user={"id": 1},
     )
 
-    assert called["branch"] == "continue_project"
+    assert called["planning_branch"] == "continue_project"
+    assert called["production_branch"] == "production_run"
     assert called["action"] == "generate_story_plan"
     assert called["instruction"] == "做一段接近《主角》的1分钟视频"
     assert called["stop_after_planning"] != "True"
-    assert result["run_id"] == "run-story"
-    assert result["action"] == "continue_project"
+    assert called["production_goal"] == called["instruction"]
+    assert result["run_id"] == "run-video"
+    assert result["action"] == "production_run"
+    assert result["production_run_id"] == "prod-1"
     assert result["result"]["routed_from"] == "production_run_missing_storyboard"
 
 
 @pytest.mark.asyncio
 async def test_create_run_production_run_allows_autopilot_to_continue_after_story_plan(monkeypatch):
     called: dict[str, object] = {}
+    storyboard_checks = 0
 
     async def fake_owner(db, *, project_id: str, user_id: int) -> None:
         called["owner"] = project_id
 
     async def fake_has_storyboard(db, *, project_id: str, user_id: int) -> bool:
-        return False
+        nonlocal storyboard_checks
+        storyboard_checks += 1
+        return storyboard_checks > 1
 
     async def fake_continue_project_brain(project_id: str, body: dict, db, current_user: dict) -> dict:
         called["body"] = body
         return {"run_id": "run-story", "status": "running", "action": body["action"]}
 
+    async def fake_start_video_production(project_id: str, body: dict, db, current_user: dict) -> dict:
+        called["production_body"] = body
+        return {"agent_run_id": "run-video", "status": "queued", "task_id": "task-video", "production_run_id": "prod-1"}
+
     monkeypatch.setattr(agent_runs, "_ensure_project_owner", fake_owner)
     monkeypatch.setattr(agent_runs, "_project_has_storyboard_shots", fake_has_storyboard)
     monkeypatch.setattr(agent_runs, "continue_project_brain", fake_continue_project_brain)
+    monkeypatch.setattr(agent_runs, "start_video_production", fake_start_video_production)
 
     result = await agent_runs.create_run(
         {"project_id": "project-1", "mode": "autopilot", "action": "production_run", "goal": "生成一分钟视频", "allowed_max_credits": 500},
@@ -700,7 +921,9 @@ async def test_create_run_production_run_allows_autopilot_to_continue_after_stor
     assert body["action"] == "generate_story_plan"
     assert body["mode"] == "autopilot"
     assert body.get("_stop_after_planning") is not True
-    assert result["action"] == "continue_project"
+    assert result["action"] == "production_run"
+    assert result["run_id"] == "run-video"
+    assert result["production_run_id"] == "prod-1"
 
 
 @pytest.mark.asyncio
@@ -769,7 +992,7 @@ async def test_start_video_production_routes_video_runner_through_gateway(monkey
 
     result = await workbench.start_video_production(
         "project-1",
-        body={"goal": "generate preview", "provider_mode": "real", "video_provider": "seedance"},
+        body={"goal": "generate preview", "provider_mode": "real", "video_provider": "ltx2.3"},
         db=object(),
         current_user={"id": 1, "tier": "free"},
     )

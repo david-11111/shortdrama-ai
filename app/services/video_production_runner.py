@@ -40,6 +40,13 @@ from app.services.video_edit import export_final_video
 logger = logging.getLogger(__name__)
 
 
+def _is_text_only(provider_name: str) -> bool:
+    """查视频 provider 是否纯文本输入（延迟 import 打破循环）。"""
+    from app.services.video_provider import get_config
+    cfg = get_config(provider_name)
+    return cfg.text_only if cfg else False
+
+
 class ProviderDeferredError(RuntimeError):
     def __init__(self, message: str, *, stage: str, failed_tasks: list[dict[str, Any]]) -> None:
         super().__init__(message)
@@ -79,7 +86,7 @@ class VideoProductionRunner:
         allow_local_placeholders: bool = False,
         provider_mode: str = "local",
         image_provider: str = "seedream",
-        video_provider: str = "ltx2.3",
+        video_provider: str = "joy-echo",
         wait_provider_timeout_sec: int = 1800,
         max_image_tasks: int = 3,
         max_video_tasks: int = 3,
@@ -103,7 +110,7 @@ class VideoProductionRunner:
         self.allow_local_placeholders = bool(allow_local_placeholders)
         self.provider_mode = _normalize_provider_mode(provider_mode)
         self.image_provider = str(image_provider or "seedream").strip().lower()
-        self.video_provider = str(video_provider or "ltx2.3").strip().lower()
+        self.video_provider = str(video_provider or "joy-echo").strip().lower()
         self.wait_provider_timeout_sec = max(30, int(wait_provider_timeout_sec or 1800))
         self.max_image_tasks = max(1, int(max_image_tasks or 15))
         self.max_video_tasks = max(1, int(max_video_tasks or 10))
@@ -327,28 +334,36 @@ class VideoProductionRunner:
         rows = await self._load_shots()
         missing = [row for row in rows if not str(row.get("selected_image") or "").strip()]
         if self.provider_mode == "real" and missing:
-            targets = missing[: self.max_image_tasks]
-            dispatch = await self._dispatch_media_tasks(
-                targets,
-                task_type="image_gen",
-                operation="image_gen",
-                provider=self.image_provider,
-                queue="image",
-                celery_task="app.tasks.image_tasks.generate_image_task",
-                status_value="generating_image",
-                progress=38,
-            )
-            wait = await self._wait_for_child_tasks(dispatch["task_ids"], stage="generate_keyframes")
-            refreshed = await self._load_shots()
-            remaining = [row for row in refreshed if not str(row.get("selected_image") or "").strip()]
-            if remaining:
-                raise RuntimeError(f"Keyframe generation finished but {len(remaining)} shot(s) still miss selected_image")
+            queued = 0
+            completed = 0
+            credits_reserved = 0
+            while missing:
+                targets = missing[: self.max_image_tasks]
+                dispatch = await self._dispatch_media_tasks(
+                    targets,
+                    task_type="image_gen",
+                    operation="image_gen",
+                    provider=self.image_provider,
+                    queue="image",
+                    celery_task="app.tasks.image_tasks.generate_image_task",
+                    status_value="generating_image",
+                    progress=38,
+                )
+                wait = await self._wait_for_child_tasks(dispatch["task_ids"], stage="generate_keyframes")
+                queued += len(dispatch["task_ids"])
+                completed += int(wait.get("done") or 0)
+                credits_reserved += int(dispatch.get("credits_reserved") or 0)
+                refreshed = await self._load_shots()
+                remaining = [row for row in refreshed if not str(row.get("selected_image") or "").strip()]
+                if len(remaining) >= len(missing):
+                    raise RuntimeError(f"Keyframe generation finished but {len(remaining)} shot(s) still miss selected_image")
+                missing = remaining
             return {
                 "provider_mode": "real",
                 "provider": self.image_provider,
-                "queued": len(dispatch["task_ids"]),
-                "completed": wait["done"],
-                "credits_reserved": dispatch["credits_reserved"],
+                "queued": queued,
+                "completed": completed,
+                "credits_reserved": credits_reserved,
             }
         updated = 0
         for row in missing:
@@ -381,28 +396,36 @@ class VideoProductionRunner:
             missing_images = [row for row in missing if not str(row.get("selected_image") or "").strip()]
             if missing_images:
                 raise RuntimeError(f"Cannot generate videos before keyframes: {len(missing_images)} shot(s) miss selected_image")
-            targets = missing[: self.max_video_tasks]
-            dispatch = await self._dispatch_media_tasks(
-                targets,
-                task_type="video_gen",
-                operation="video_gen_15s" if self.video_provider in {"ltx2.3", "wan", "wan2.1", "wan2_1"} else "video_gen_5s",
-                provider=self.video_provider,
-                queue="video",
-                celery_task="app.tasks.video_tasks.generate_video_task",
-                status_value="generating_video",
-                progress=48,
-            )
-            wait = await self._wait_for_child_tasks(dispatch["task_ids"], stage="generate_videos")
-            refreshed = await self._load_shots()
-            remaining = [row for row in refreshed if not str(row.get("selected_video") or "").strip()]
-            if remaining:
-                raise RuntimeError(f"Video generation finished but {len(remaining)} shot(s) still miss selected_video")
+            queued = 0
+            completed = 0
+            credits_reserved = 0
+            while missing:
+                targets = missing[: self.max_video_tasks]
+                dispatch = await self._dispatch_media_tasks(
+                    targets,
+                    task_type="video_gen",
+                    operation=("video_gen_15s" if _is_text_only(self.video_provider) else "video_gen_5s"),
+                    provider=self.video_provider,
+                    queue="video",
+                    celery_task="app.tasks.video_tasks.generate_video_task",
+                    status_value="generating_video",
+                    progress=48,
+                )
+                wait = await self._wait_for_child_tasks(dispatch["task_ids"], stage="generate_videos")
+                queued += len(dispatch["task_ids"])
+                completed += int(wait.get("done") or 0)
+                credits_reserved += int(dispatch.get("credits_reserved") or 0)
+                refreshed = await self._load_shots()
+                remaining = [row for row in refreshed if not str(row.get("selected_video") or "").strip()]
+                if len(remaining) >= len(missing):
+                    raise RuntimeError(f"Video generation finished but {len(remaining)} shot(s) still miss selected_video")
+                missing = remaining
             return {
                 "provider_mode": "real",
                 "provider": self.video_provider,
-                "queued": len(dispatch["task_ids"]),
-                "completed": wait["done"],
-                "credits_reserved": dispatch["credits_reserved"],
+                "queued": queued,
+                "completed": completed,
+                "credits_reserved": credits_reserved,
             }
         if missing and not self.allow_local_placeholders:
             raise RuntimeError("No selected_video for some shots; enable local placeholders or run provider video generation first.")
@@ -742,6 +765,7 @@ class VideoProductionRunner:
             "seedance": f"{base}/models",
             "seedream": f"{base}/models",
             "doubao": f"{base}/models",
+            "joy-echo": None,
             "ltx2.3": f"{settings.ltx_api_base_url.rstrip('/')}/health" if settings.ltx_api_base_url else None,
             "ltx": f"{settings.ltx_api_base_url.rstrip('/')}/health" if settings.ltx_api_base_url else None,
             "wan": f"{settings.inference_api_base_url.rstrip('/')}/v1/health" if settings.inference_api_base_url else None,
@@ -892,9 +916,13 @@ class VideoProductionRunner:
                 }
                 payload.update({key: value for key, value in self.semantic_control.items() if value})
                 if task_type == "video_gen":
-                    payload["image_url"] = row.get("selected_image") or ""
-                    if provider in {"ltx2.3", "wan", "wan2.1", "wan2_1"}:
-                        payload.update({"width": 1088, "height": 960, "steps": 10, "timeout_seconds": 3600})
+                    if not _is_text_only(provider):
+                        payload["image_url"] = row.get("selected_image") or ""
+                    if provider in {"joy-echo", "joy_echo", "joyai-echo", "joyai_echo"}:
+                        payload["duration"] = max(30, int(payload.get("duration") or 30))
+                        payload.update({"width": 1280, "height": 736, "timeout_seconds": 7200})
+                    elif provider in {"ltx2.3", "wan", "wan2.1", "wan2_1"}:
+                        payload.update({"width": 960, "height": 544, "steps": 10, "timeout_seconds": 3600})
                 payload = adapt_provider_payload(payload, task_type=task_type, provider=provider)
                 payloads.append(payload)
                 db_payload = {**payload, "_credit_transaction_id": transaction_ids[index]}
@@ -1319,10 +1347,16 @@ def _provider_label(provider: str, task_type: str) -> str:
     text_value = f"{provider} {task_type}".lower()
     if "seedream" in text_value or "image" in text_value:
         return "Seedream ??"
-    if "seedance" in text_value or "video" in text_value:
-        return "Seedance ??"
+    if "joy-echo" in text_value or "joy_echo" in text_value or "joyai-echo" in text_value or "joyai_echo" in text_value:
+        return "Joy-Echo"
+    if "ltx2.3" in text_value or "ltx" in text_value or "wan" in text_value:
+        return "LTX 2.3"
+    if "seedance" in text_value:
+        return "Seedance"
     if "kling" in text_value:
-        return "Kling ??"
+        return "Kling"
+    if "video" in text_value:
+        return "LTX 2.3"
     return provider or task_type
 
 

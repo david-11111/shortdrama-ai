@@ -28,6 +28,8 @@ const actorLabel = computed(() => {
   if (actor === 'deepseek') return 'DeepSeek'
   if (actor === 'executor') return '执行器'
   if (actor === 'seedream') return 'Seedream'
+  if (actor === 'joy-echo' || actor === 'joy_echo' || actor === 'joyai-echo' || actor === 'joyai_echo') return 'Joy-Echo'
+  if (actor === 'ltx2.3' || actor === 'ltx') return 'LTX 2.3'
   if (actor === 'seedance') return 'Seedance'
   return 'Agent'
 })
@@ -79,7 +81,7 @@ const timeLabel = computed(() => {
   gap: 2px;
   border-radius: 16px;
   padding: 12px 16px;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -140,7 +142,7 @@ const timeLabel = computed(() => {
   content: '\2588';
   animation: typing-blink 0.8s step-end infinite;
   color: #58a6ff;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .bubble-time {

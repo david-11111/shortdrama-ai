@@ -13,6 +13,7 @@ from app.services.state_machine.models import (
     PRODUCTION_POLICIES,
     POLICY_VERSION,
     POLICY_BY_STAGE_ID,
+    ReworkTrigger,
     STAGE_BY_ACTION,
     STAGE_BY_ID,
     resolve_node_id,
@@ -30,6 +31,11 @@ def evaluate_production_stages(
     """Evaluate every production stage against current state.
 
     Returns one dict per policy, in policy order.
+
+    When a stage's ``rework_triggers`` are active, the stage itself is
+    marked ``rework_needed`` and the *rework_to* field points to the
+    target stage ID so callers (especially ``recommend_next_action``)
+    can redirect execution.
     """
     stats = _compute_stats(shots, tasks, production_run)
     completed: set[str] = set()
@@ -45,6 +51,9 @@ def evaluate_production_stages(
         if status == "completed":
             completed.add(policy.id)
 
+        # ── Rework detection ────────────────────────────────────────────
+        rework = _evaluate_rework_triggers(policy, stats, completed)
+
         rows.append({
             "id": policy.id,
             "title": policy.title,
@@ -56,6 +65,7 @@ def evaluate_production_stages(
             "gate": gate,
             "stats": stats,
             "policy": _policy_metadata(policy),
+            "rework": rework,  # added field
         })
 
     return rows
@@ -95,8 +105,38 @@ def recommend_next_action(
     tasks: list[dict[str, Any]],
     production_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return the first action that is not yet completed."""
+    """Return the first action that is not yet completed.
+
+    Rework triggers take priority over normal forward progression:
+    if a stage's rework condition is active we redirect to the
+    ``rework_to`` stage instead of returning the stage itself.
+    """
     for stage in evaluate_production_stages(shots=shots, tasks=tasks, production_run=production_run):
+        # ── Rework redirect ──────────────────────────────────────────
+        rework = stage.get("rework") or {}
+        if rework.get("triggered") and rework.get("rework_to"):
+            # Map back_to stage ID to its action
+            back_stage = STAGE_BY_ID.get(rework["rework_to"])
+            back_action = back_stage.action if back_stage else rework["rework_to"]
+            gate = stage.get("gate", {})
+            return {
+                "action": back_action,
+                "stage_id": rework["rework_to"],
+                "status": "pending",
+                "reason": rework.get("reason") or gate.get("reason", ""),
+                "allowed": True,
+                "rework_redirect": {
+                    "from_stage": stage["id"],
+                    "rework_to": rework["rework_to"],
+                    "scope": rework.get("scope", "affected"),
+                    "affects_shots": rework.get("affects_shots", []),
+                    "depth": rework.get("depth", "shallow"),
+                    "max_retries": rework.get("max_retries", 3),
+                    "retry_exhausted_action": rework.get("retry_exhausted_action", "skip_shot"),
+                    "missing": gate.get("missing", []),
+                },
+            }
+
         if stage["status"] in {"pending", "blocked", "running"}:
             return {
                 "action": stage["action"],
@@ -106,6 +146,23 @@ def recommend_next_action(
                 "allowed": stage["gate"]["allowed"],
             }
     return {"action": "writeback_review", "stage_id": "writeback_review", "status": "completed", "reason": "", "allowed": True}
+
+
+def should_escalate(
+    rework_redirect: dict[str, Any],
+    attempt: int,
+) -> str:
+    """Check whether auto-rework should escalate.
+
+    Returns ``"proceed"`` if the rework can continue, or the escalation
+    action (``"skip_shot"`` / ``"human_review"``) if retries are exhausted.
+
+    ``attempt`` is 1-based: the first rework is attempt 1.
+    """
+    max_retries = rework_redirect.get("max_retries", 3)
+    if attempt > max_retries:
+        return rework_redirect.get("retry_exhausted_action", "skip_shot")
+    return "proceed"
 
 
 # ── Internal helpers ────────────────────────────────────────────────────────
@@ -219,3 +276,75 @@ def _recovery_from(stage: dict[str, Any]) -> str:
     if missing:
         return "fallback_reasoning"
     return ""
+
+
+def _evaluate_rework_triggers(
+    policy,
+    stats: dict[str, Any],
+    completed: set[str],
+) -> dict[str, Any]:
+    """Check rework triggers for *policy*.
+
+    Returns a dict::
+
+        {"triggered": True, "rework_to": "generate_keyframes",
+         "scope": "affected", "reason": "..."}
+        # or
+        {"triggered": False}
+
+    Guards (all must pass for rework to fire):
+
+    1. **back_to stage is completed** — the target of the rework must
+       have finished at least once.  This prevents false positives
+       during initial forward progression (e.g. "no selected images yet"
+       would happily trigger "go back to generate_keyframes" before
+       generate_keyframes has even run).
+
+    2. **All upstream deps of back_to are still in completed** — if a
+       stage *before* the back_to target somehow regressed, the system
+       should fix that first rather than jumping to the rework target.
+       This prevents phantom reworks when ancestor stages unexpectedly
+       revert.
+    """
+    if not policy.rework_triggers:
+        return {"triggered": False}
+
+    # Guard 1: back_to stage must have completed at least once
+    relevant = [
+        t for t in policy.rework_triggers
+        if t.back_to in completed
+    ]
+    if not relevant:
+        return {"triggered": False}
+
+    # Guard 2: all ancestors of back_to must also still be completed
+    # (don't jump to rework if an earlier stage regressed).
+    for trigger in relevant:
+        back_stage = POLICY_BY_STAGE_ID.get(trigger.back_to)
+        if back_stage:
+            for dep in back_stage.depends_on:
+                if dep not in completed:
+                    return {"triggered": False}
+    if not relevant:
+        return {"triggered": False}
+
+    for trigger in relevant:
+        if trigger.condition.evaluate(stats):
+            # Determine which shots are affected
+            affects_shots: list[int] = []
+            if trigger.scope == "affected":
+                affects_shots = stats.get("image_blocking_shots") or stats.get("video_blocking_shots") or []
+            return {
+                "triggered": True,
+                "rework_to": trigger.back_to,
+                "scope": trigger.scope,
+                "affects_shots": affects_shots,
+                "depth": trigger.depth,
+                "max_retries": trigger.max_retries,
+                "retry_exhausted_action": trigger.retry_exhausted_action,
+                "reason": trigger.reason or (
+                    f"Rework triggered: {trigger.condition.metric} "
+                    f"{trigger.condition.op} {trigger.condition.expected}"
+                ),
+            }
+    return {"triggered": False}

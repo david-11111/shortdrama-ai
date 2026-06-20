@@ -12,6 +12,7 @@ from app.routes.prompt import router as prompt_router
 from app.routes.reports import router as reports_router
 from app.routes.tasks import router as tasks_router
 from app.routes.users import router as users_router
+from app.routes.ltx_desktop import router as ltx_desktop_router
 from app.routes.webhooks import router as webhooks_router
 from app.routes.workbench import router as workbench_router
 
@@ -30,3 +31,4 @@ api_router.include_router(director_router)
 api_router.include_router(keyframes_router)
 api_router.include_router(media_router)
 api_router.include_router(agent_runs_router)
+api_router.include_router(ltx_desktop_router)

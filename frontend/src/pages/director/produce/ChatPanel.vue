@@ -259,7 +259,7 @@ async function triggerAutoBranches(done: TaskDonePayload, seedText: string) {
         const data = await dispatchWithRetry('视频自动派发', async () => {
           const resp = await directorProduce({
             project_id: session.projectId.value,
-            provider: 'seedance',
+            provider: 'joy-echo',
           }, { silent: true })
           return resp.data
         }, 15)

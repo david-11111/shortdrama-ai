@@ -11,4 +11,4 @@ def test_agent_run_launch_defaults_to_clean_fresh_project():
     assert "const createFreshProject = ref(true)" in source
     assert "project_id: createFreshProject.value ? '' : form.value.project_id" in source
     assert "clean_start: true" in source
-    assert "video_provider: 'ltx2.3'" in source
+    assert "video_provider: 'joy-echo'" in source

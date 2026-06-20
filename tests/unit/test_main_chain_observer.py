@@ -36,6 +36,26 @@ def test_image_task_done_with_selected_image_has_no_writeback_signal():
     assert signals == []
 
 
+def test_image_task_done_checks_matching_shot_index():
+    signals = expected_write_signals(
+        task={
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "task_type": "image_gen",
+            "status": "done",
+            "payload": {"shot_index": 2},
+            "result": {"image_url": "https://cdn.example.com/b.jpg"},
+        },
+        shots=[
+            {"shot_index": 1, "selected_image": "https://cdn.example.com/a.jpg", "selected_video": ""},
+            {"shot_index": 2, "selected_image": "", "selected_video": ""},
+        ],
+    )
+
+    assert len(signals) == 1
+    assert signals[0].evidence_refs[0]["shot_index"] == 2
+
+
 def test_video_task_done_without_selected_video_emits_writeback_failed():
     signals = expected_write_signals(
         task={
@@ -50,6 +70,26 @@ def test_video_task_done_without_selected_video_emits_writeback_failed():
 
     assert signals[0].type == "WRITEBACK_FAILED"
     assert signals[0].evidence_refs[0]["field"] == "selected_video"
+
+
+def test_video_task_done_checks_matching_shot_index():
+    signals = expected_write_signals(
+        task={
+            "task_id": "task-2",
+            "run_id": "run-1",
+            "task_type": "video_gen",
+            "status": "done",
+            "payload": {"shot_row": {"shot_index": 2}},
+            "result": {"video_url": "https://cdn.example.com/v2.mp4"},
+        },
+        shots=[
+            {"shot_index": 1, "selected_image": "https://cdn.example.com/a.jpg", "selected_video": "https://cdn.example.com/v1.mp4"},
+            {"shot_index": 2, "selected_image": "https://cdn.example.com/b.jpg", "selected_video": ""},
+        ],
+    )
+
+    assert len(signals) == 1
+    assert signals[0].evidence_refs[0]["shot_index"] == 2
 
 
 def test_video_task_missing_required_thumbnail_metadata_emits_missing_artifact():
@@ -149,6 +189,7 @@ async def test_observe_task_writeback_accepts_shot_row_image_candidate_metadata(
                     "user_id": 7,
                     "task_type": "image_gen",
                     "status": "done",
+                    "payload": {"shot_index": 1},
                     "result": {"image_url": "https://cdn.example.com/a.jpg"},
                 }
             ],
@@ -192,6 +233,7 @@ async def test_observe_task_writeback_runs_artifact_verification(monkeypatch):
                     "user_id": 7,
                     "task_type": "video_gen",
                     "status": "done",
+                    "payload": {"shot_index": 1},
                     "result": {"video_url": "https://cdn.example.com/v.mp4"},
                 }
             ],
@@ -207,6 +249,60 @@ async def test_observe_task_writeback_runs_artifact_verification(monkeypatch):
     assert any(
         event["source"] == "main_chain_observer"
         and event["meta"]["observation_signal"]["type"] == "MISSING_ARTIFACT"
+        for event in published
+    )
+
+
+@pytest.mark.asyncio
+async def test_observe_task_writeback_checks_current_video_shot(monkeypatch):
+    published = []
+
+    async def fake_publish_agent_event(*args, **kwargs):
+        published.append(kwargs)
+
+    monkeypatch.setattr("app.services.main_chain_observer.publish_agent_event", fake_publish_agent_event)
+
+    task_id = "11111111-1111-1111-1111-111111111111"
+    db = FakeDb(
+        [
+            [
+                {
+                    "task_id": task_id,
+                    "run_id": "22222222-2222-2222-2222-222222222222",
+                    "project_id": "project-1",
+                    "user_id": 7,
+                    "task_type": "video_gen",
+                    "status": "done",
+                    "payload": {"shot_row": {"shot_index": 2}},
+                    "result": {"video_url": "https://cdn.example.com/v2.mp4"},
+                }
+            ],
+            [
+                {
+                    "shot_index": 1,
+                    "selected_image": "https://cdn.example.com/a.jpg",
+                    "selected_video": "https://cdn.example.com/v1.mp4",
+                    "image_candidates_json": [],
+                    "video_variants_json": [{"url": "https://cdn.example.com/v1.mp4"}],
+                },
+                {
+                    "shot_index": 2,
+                    "selected_image": "https://cdn.example.com/b.jpg",
+                    "selected_video": "",
+                    "image_candidates_json": [],
+                    "video_variants_json": [],
+                },
+            ],
+            [],
+            [{"id": "event-1", "event_type": "writeback", "phase": "writeback_selected_video", "meta": {}}],
+        ]
+    )
+
+    signals = await observe_task_writeback(db, task_id)
+
+    assert any(signal["type"] == "WRITEBACK_FAILED" for signal in signals)
+    assert any(
+        event["meta"]["observation_signal"]["type"] == "WRITEBACK_FAILED"
         for event in published
     )
 

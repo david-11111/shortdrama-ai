@@ -82,6 +82,21 @@ def _extract_story_intent_constraints(
     requirement_card = story_understanding.get("understanding_card") if isinstance(story_understanding.get("understanding_card"), dict) else {}
     if str(story_understanding.get("demand_type") or requirement_card.get("demand_type") or "").strip() == "product_ad":
         return _product_ad_intent_constraints(text, project_name, story_understanding)
+    if _is_courier_office_delivery_intent(text):
+        return {
+            "story_type": "courier_office_delivery",
+            "summary": "一名快递员把重要包裹送进高档写字楼的黄金区，核心看点是身份落差、门禁压力、包裹交接和楼宇空间质感。",
+            "lead_reference": "快递员",
+            "story_understanding": story_understanding,
+            "character_lock": f"{project_name} 的主角锁定为一名现实感快递员：蓝灰色或深色配送工装、斜挎包、手持包裹或签收单，疲惫但专注，不能退化成泛化电视剧主角。",
+            "scene_lock": "场景锁定在高档写字楼黄金区：玻璃幕墙大堂、安保台、前台、门禁闸机、电梯厅、金色导视牌和干净商务灯光，不能变成普通街道、金店或无身份空景。",
+            "prop_lock": "关键道具是快递包裹、手持扫码枪或手机、签收单、门禁卡/访客贴、写字楼黄金区导视牌；每个镜头至少保留快递包裹或楼宇身份线索之一。",
+            "camera_plan": "先用高档写字楼空间建立身份落差，再用快递员近景、门禁交涉、包裹特写和电梯厅推进，画面最多两名核心人物同框。",
+            "performance_plan": "表演克制现实：快递员看楼层信息、递包裹、等待核验、被安保拦停、重新确认地址，情绪从赶时间到紧张再到完成交付。",
+            "scene_goal": "第一场必须让观众看懂：快递员要把包裹送到高档写字楼黄金区，但门禁和身份差异让交付变成一个有压力的短剧事件。",
+            "reference_plan": "参考图优先生成快递员工装、写字楼大堂/电梯厅、包裹签收道具、金色导视牌和商务冷暖混合灯光。",
+            "must_not": "不要金店回收、不要人群排队、不要把快递员变成西装白领、不要丢掉包裹交付目标。",
+        }
     if _is_real_project_process_intent(text):
         return {
             "story_type": "real_project_process",
@@ -177,6 +192,14 @@ def _is_real_project_process_intent(text: str) -> bool:
     return any(term in value for term in process_terms)
 
 
+def _is_courier_office_delivery_intent(text: str) -> bool:
+    value = str(text or "")
+    has_courier = any(term in value for term in ("快递员", "快递", "配送员", "送件"))
+    has_office = any(term in value for term in ("写字楼", "办公楼", "大厦", "电梯厅", "前台", "门禁"))
+    has_delivery = any(term in value for term in ("送", "包裹", "签收", "投递", "交付"))
+    return has_courier and has_office and has_delivery
+
+
 def _product_ad_intent_constraints(
     instruction: str,
     project_name: str,
@@ -251,6 +274,17 @@ def _build_initial_batch_shots(
             ("细节补强", f"补一个{props}的细节镜头，强调材质、轮廓、高光和可见效果；镜头稳定、构图留白、质感高级。", 3),
             ("场景统一", f"回到统一广告拍摄空间，背景、光线、产品位置和使用部位保持连续；避免杂物、路人和剧情化表演。", 3),
             ("品牌落点", f"最后用{subject}的产品视觉完成落点，画面简洁，保留{selling_points}和{tones}，可衔接品牌 LOGO 或短句。", 4),
+        ]
+    elif intent.get("story_type") == "courier_office_delivery":
+        templates = [
+            ("写字楼建立", f"{anchor}站在高档写字楼黄金区玻璃大堂入口，手里拿着包裹和手机地址页，金色导视牌、门禁闸机和前台清楚可见，建立送达目标和空间质感。", 4),
+            ("快递员身份", f"{anchor}半身近景，配送工装、斜挎包、包裹标签和微微出汗的脸部状态清楚，体现赶时间但克制的现实感。", 4),
+            ("门禁受阻", f"{anchor}在安保台前递出手机订单和包裹，安保或前台只出现一人同框核验，画面重点是快递员被门禁流程拦住。", 5),
+            ("包裹特写", f"快递包裹、签收单、手机楼层信息和黄金区导视牌同框特写，手部动作清楚，说明他要送到高档写字楼内部指定楼层。", 3),
+            ("电梯厅推进", f"{anchor}穿过闸机后站在电梯厅看楼层屏，玻璃墙、金属电梯门和商务灯光保持统一，动作目标是继续完成交付。", 4),
+            ("压力反应", f"{anchor}听到前台再次确认收件人信息后停顿，近景强调眼神和手里的包裹，不允许变成空镜或路人群像。", 4),
+            ("交接瞬间", f"{anchor}把包裹递给写字楼工作人员或收件人，双方最多两人同框，签收动作明确，包裹始终是画面核心道具。", 5),
+            ("完成落点", f"{anchor}走出电梯厅或大堂回头看一眼黄金区导视牌，手机显示已签收，留下高档写字楼与普通快递员身份落差的余味。", 4),
         ]
     elif intent.get("entity_resolution"):
         templates = [

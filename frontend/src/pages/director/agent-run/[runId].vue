@@ -74,6 +74,13 @@
           <span v-if="composerError" class="composer-error">{{ composerError }}</span>
           <span v-if="composerNotice" class="composer-notice">{{ composerNotice }}</span>
         </div>
+        <div v-if="failedShots.length > 0 && !skippingShot && !runCancelled" class="skip-shot-bar">
+          <span class="skip-shot-hint">{{ failedShots.length }} 个镜头生成失败</span>
+          <button type="button" class="skip-shot-btn" @click="skipAllFailedShots">跳过所有失败镜头</button>
+        </div>
+        <div v-if="reworkNotice" class="rework-notice-bar">
+          <span>{{ reworkNotice }}</span>
+        </div>
       </form>
     </section>
 
@@ -104,7 +111,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { cancelAgentRun, continueAgentRunStep } from '@/api/director'
+import { cancelAgentRun, continueAgentRunStep, skipShotAction } from '@/api/director'
 import ChatStream from './components/ChatStream.vue'
 import EvidenceLayers from './components/EvidenceLayers.vue'
 import EventTimeline from './components/EventTimeline.vue'
@@ -126,6 +133,7 @@ const submittingInstruction = ref(false)
 const cancellingRun = ref(false)
 const composerError = ref('')
 const composerNotice = ref('')
+const skippingShot = ref(false)
 const lastRoutingSummary = ref('')
 const lastComposerStatus = ref('')
 const activeView = ref<'timeline' | 'chat'>('timeline')
@@ -182,6 +190,35 @@ const outputSummary = computed(() => {
   const imageCount = Number(summary.image_count || outputs?.images?.length || 0)
   const videoCount = Number(summary.video_count || outputs?.videos?.length || 0)
   return `${shotCount} 镜头 · ${imageCount} 图片 · ${videoCount} 视频`
+})
+const failedShots = computed(() => {
+  const shots = snapshot.value?.outputs?.shots || []
+  return shots.filter((s: any) => {
+    const hasError = s.last_error || (s.status === 'failed' || s.status === 'error')
+    const noVideo = !s.selected_video
+    return hasError && noVideo
+  })
+})
+const reworkNotice = computed(() => {
+  const now = Date.now()
+  const recent = liveEventsForRun.value.filter((e: any) => {
+    if (e.action !== 'agent_run.rework_auto') return false
+    const t = e.time || e.created_at
+    if (!t) return false
+    return (now - new Date(t).getTime()) < 60000
+  })
+  const last = recent[recent.length - 1]
+  if (!last) return ''
+  const payload = (last as any).payload || (last as any).meta || {}
+  const reworkAction = payload.rework_action || ''
+  const attempt = payload.attempt || 1
+  const maxRetries = payload.max_retries || 3
+  const actionLabel: Record<string, string> = {
+    generate_keyframes: '关键帧',
+    generate_videos: '视频',
+    plan_final_edit: '成片',
+  }
+  return `🔄 自动返工${actionLabel[reworkAction] || reworkAction} (${attempt}/${maxRetries})`
 })
 const showOutputs = computed(() => {
   const outputs = snapshot.value?.outputs
@@ -350,6 +387,25 @@ async function cancelRun() {
       : detail?.message || err?.message || '取消 Agent Run 失败'
   } finally {
     cancellingRun.value = false
+  }
+}
+
+async function skipAllFailedShots() {
+  if (!runId.value || skippingShot.value) return
+  skippingShot.value = true
+  composerError.value = ''
+  try {
+    const { data } = await skipShotAction(runId.value)
+    const count = data?.skipped_count || 0
+    composerNotice.value = `已跳过 ${count} 个失败镜头`
+    await refresh()
+  } catch (err: any) {
+    const detail = err?.response?.data?.detail
+    composerError.value = typeof detail === 'string'
+      ? detail
+      : detail?.message || err?.message || '跳过镜头失败'
+  } finally {
+    skippingShot.value = false
   }
 }
 
@@ -693,7 +749,7 @@ function containsAny(text: string, keywords: string[]) {
   max-height: 100px;
   resize: vertical;
   border: 1px solid #30363d;
-  border-radius: 10px;
+  border-radius: 8px;
   background: #090c10;
   color: #e6edf3;
   padding: 9px 12px;
@@ -716,7 +772,7 @@ function containsAny(text: string, keywords: string[]) {
   background: #1f6feb;
   color: #fff;
   padding: 0 14px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -835,5 +891,41 @@ function containsAny(text: string, keywords: string[]) {
   .grid-output { display: none; }
   .grid-center { grid-column: 1; }
   .grid-statusbar { grid-column: 1; }
+}
+/* --- Skip shot bar --- */
+.skip-shot-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-top: 1px solid #30363d;
+  background: #0d1117;
+}
+.skip-shot-hint {
+  font-size: 12px;
+  color: #f0883e;
+}
+.skip-shot-btn {
+  font-size: 12px;
+  padding: 2px 10px;
+  border: 1px solid #d29922;
+  border-radius: 4px;
+  background: transparent;
+  color: #d29922;
+  cursor: pointer;
+}
+.skip-shot-btn:hover {
+  background: rgba(210, 153, 34, 0.12);
+}
+/* --- Rework notice bar --- */
+.rework-notice-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-top: 1px solid #30363d;
+  background: #0d1117;
+  font-size: 12px;
+  color: #58a6ff;
 }
 </style>

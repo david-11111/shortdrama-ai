@@ -21,16 +21,18 @@ logger = logging.getLogger(__name__)
 
 _CHECK_TIMEOUT = 3.0  # seconds per check
 
-# Maps task_type -> Celery queue -> Provider key pool service
+# Maps task_type -> Celery queue -> default provider.
 _TASK_INFRA_MAP: dict[str, dict[str, str]] = {
-    "video_gen": {"queue": "video", "provider": "seedance"},
+    "video_gen": {"queue": "video", "provider": "joy-echo"},
     "image_gen": {"queue": "image", "provider": "seedream"},
     "tts_gen": {"queue": "text", "provider": "doubao"},
-    "video_production_run": {"queue": "video", "provider": "seedance"},
+    "video_production_run": {"queue": "video", "provider": "joy-echo"},
 }
 
+_KEY_POOL_PROVIDERS = {"seedance", "seedream", "kling", "doubao"}
 
-async def guard_infrastructure_preflight(task_type: str) -> None:
+
+async def guard_infrastructure_preflight(task_type: str, provider: str | None = None) -> None:
     """Verify infrastructure readiness before accepting a generation request.
 
     Checks in order:
@@ -47,7 +49,7 @@ async def guard_infrastructure_preflight(task_type: str) -> None:
 
     checks: dict[str, bool | str] = {}
     queue = infra["queue"]
-    provider = infra["provider"]
+    provider_name = str(provider or infra["provider"]).strip().lower()
 
     # 1. Redis (broker) reachability
     try:
@@ -74,25 +76,26 @@ async def guard_infrastructure_preflight(task_type: str) -> None:
         logger.warning("infrastructure_preflight: celery worker error for queue=%s: %s", queue, exc)
         checks[f"worker_{queue}"] = str(exc)
 
-    # 3. Provider key pool has available capacity
-    try:
-        capacity = await asyncio.wait_for(
-            asyncio.to_thread(check_capacity_sync, provider),
-            timeout=_CHECK_TIMEOUT,
-        )
-        has_available = capacity.available_slots > 0
-        checks[f"provider_{provider}"] = has_available
-        if not has_available:
-            logger.warning(
-                "infrastructure_preflight: provider %s saturated, available_slots=%d, cooldown=%s",
-                provider, capacity.available_slots, capacity.cooldown_keys,
+    # 3. Provider key pool capacity. LTX2.3 uses the self-hosted API, not key_pool.
+    if provider_name in _KEY_POOL_PROVIDERS:
+        try:
+            capacity = await asyncio.wait_for(
+                asyncio.to_thread(check_capacity_sync, provider_name),
+                timeout=_CHECK_TIMEOUT,
             )
-    except TimeoutError:
-        logger.warning("infrastructure_preflight: provider key pool check timed out for %s", provider)
-        checks[f"provider_{provider}"] = "timeout"
-    except Exception as exc:
-        logger.warning("infrastructure_preflight: provider key pool error for %s: %s", provider, exc)
-        checks[f"provider_{provider}"] = str(exc)
+            has_available = capacity.available_slots > 0
+            checks[f"provider_{provider_name}"] = has_available
+            if not has_available:
+                logger.warning(
+                    "infrastructure_preflight: provider %s saturated, available_slots=%d, cooldown=%s",
+                    provider_name, capacity.available_slots, capacity.cooldown_keys,
+                )
+        except TimeoutError:
+            logger.warning("infrastructure_preflight: provider key pool check timed out for %s", provider_name)
+            checks[f"provider_{provider_name}"] = "timeout"
+        except Exception as exc:
+            logger.warning("infrastructure_preflight: provider key pool error for %s: %s", provider_name, exc)
+            checks[f"provider_{provider_name}"] = str(exc)
 
     failed = [name for name, ok in checks.items() if ok is not True]
     if failed:
@@ -105,7 +108,7 @@ async def guard_infrastructure_preflight(task_type: str) -> None:
         logger.warning("infrastructure_preflight BLOCKED task_type=%s failed=%s", task_type, failed)
         raise HTTPException(status_code=503, detail=detail)
 
-    logger.debug("infrastructure_preflight PASSED task_type=%s queue=%s provider=%s", task_type, queue, provider)
+    logger.debug("infrastructure_preflight PASSED task_type=%s queue=%s provider=%s", task_type, queue, provider_name)
 
 
 def _check_celery_queue_worker(queue: str) -> bool:

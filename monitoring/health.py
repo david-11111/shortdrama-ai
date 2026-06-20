@@ -36,6 +36,8 @@ router = APIRouter(tags=["health"])
 
 _START_TIME = time.monotonic()
 _CHECK_TIMEOUT_SECONDS = 2.0
+_CELERY_INSPECT_TIMEOUT_SECONDS = 5.0
+_CELERY_CHECK_TIMEOUT_SECONDS = 6.0
 _CELERY_QUEUES = ("video", "image", "text", "admin", "default")
 _INSTALLED_FLAG = "_shortdrama_monitoring_installed"
 
@@ -235,22 +237,35 @@ async def pipeline_trace() -> JSONResponse:
     # 7. Provider API reachability (HEAD / models or equivalent)
     provider_reachability: dict[str, str] = {}
     provider_urls = _build_provider_probe_urls(settings)
+    provider_probe_cache: dict[str, str] = {}
     for name, url in provider_urls.items():
         if not url:
             provider_reachability[name] = "not_configured"
             continue
+        if url in provider_probe_cache:
+            provider_reachability[name] = provider_probe_cache[url]
+            continue
         try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.head(url, headers={"Authorization": f"Bearer {settings.ark_api_key}" if "ark" in url else ""})
-                provider_reachability[name] = "ok" if resp.status_code < 500 else f"error_{resp.status_code}"
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                headers = {"Authorization": f"Bearer {settings.ark_api_key}" if "ark" in url else ""}
+                if name.startswith("ltx"):
+                    resp = await client.get(url, headers=headers)
+                else:
+                    resp = await client.head(url, headers=headers)
+                status = "ok" if resp.status_code < 500 else f"error_{resp.status_code}"
+                provider_reachability[name] = status
+                provider_probe_cache[url] = status
         except httpx.TimeoutException:
             provider_reachability[name] = "timeout"
+            provider_probe_cache[url] = "timeout"
             overall = "degraded"
         except httpx.ConnectError:
             provider_reachability[name] = "unreachable"
+            provider_probe_cache[url] = "unreachable"
             overall = "degraded"
         except Exception as exc:
             provider_reachability[name] = f"error_{type(exc).__name__}"
+            provider_probe_cache[url] = provider_reachability[name]
             overall = "degraded"
     steps.append({"name": "provider_api_reachability", "status": "ok" if all(v == "ok" or v == "not_configured" for v in provider_reachability.values()) else "degraded", "providers": provider_reachability})
 
@@ -314,7 +329,7 @@ async def _check_celery() -> dict[str, Any]:
     try:
         pings = await asyncio.wait_for(
             asyncio.to_thread(_ping_celery_workers),
-            timeout=_CHECK_TIMEOUT_SECONDS,
+            timeout=_CELERY_CHECK_TIMEOUT_SECONDS,
         )
     except TimeoutError:
         logger.warning("Celery health check timed out (ping)")
@@ -339,7 +354,7 @@ async def _check_celery() -> dict[str, Any]:
 
 def _ping_celery_workers() -> list[dict[str, Any]]:
     """Lightweight worker liveness — returns list of ping responses."""
-    result = celery_app.control.inspect(timeout=1.5).ping()
+    result = celery_app.control.inspect(timeout=_CELERY_INSPECT_TIMEOUT_SECONDS).ping()
     if not result:
         return []
     # result is dict like {'worker-video@h1': {'ok': 'pong'}}
@@ -354,7 +369,7 @@ async def _check_queue_coverage() -> dict[str, Any]:
     try:
         queues = await asyncio.wait_for(
             asyncio.to_thread(_get_queue_consumers),
-            timeout=_CHECK_TIMEOUT_SECONDS,
+            timeout=_CELERY_CHECK_TIMEOUT_SECONDS,
         )
     except TimeoutError:
         return {"status": "error", "detail": "queue inspection timed out"}
@@ -377,19 +392,26 @@ async def _check_queue_coverage() -> dict[str, Any]:
 
 def _get_queue_consumers() -> dict[str, list[dict]]:
     """Return mapping of worker -> list of queues they consume."""
-    result = celery_app.control.inspect(timeout=1.5).active_queues()
+    result = celery_app.control.inspect(timeout=_CELERY_INSPECT_TIMEOUT_SECONDS).active_queues()
     return result if isinstance(result, dict) else {}
 
 
 def _build_provider_probe_urls(settings) -> dict[str, str | None]:
     base = settings.ark_base_url.rstrip("/")
-    return {
+    urls = {
         "seedance": f"{base}/models",
         "seedream": f"{base}/models",
         "doubao": f"{base}/models",
         "ltx2.3": f"{settings.ltx_api_base_url.rstrip('/')}/health" if settings.ltx_api_base_url else None,
-        "wan2.1": f"{settings.inference_api_base_url.rstrip('/')}/v1/health" if settings.inference_api_base_url else None,
     }
+    if not settings.ltx_api_base_url and settings.inference_api_base_url:
+        urls["wan2.1"] = f"{settings.inference_api_base_url.rstrip('/')}/v1/health"
+
+    # Local LTX Desktop health check
+    if settings.ltx_desktop_install_path and settings.ltx_desktop_auto_launch:
+        urls["ltx_desktop"] = f"{settings.ltx_desktop_api_base_url.rstrip('/')}/health"
+
+    return urls
 
 
 def _trace_recommendation(steps: list[dict[str, Any]]) -> str:

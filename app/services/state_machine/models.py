@@ -77,6 +77,39 @@ class StatusRule(BaseModel):
         return all(c.evaluate(stats) for c in self.conditions)
 
 
+class ReworkTrigger(BaseModel):
+    """A condition that, when met, triggers a rework to ``back_to`` stage.
+
+    ``scope`` determines how much work is re-done:
+    - ``"affected"`` — only the shots/items that triggered the rework
+    - ``"all"`` — restart the entire stage
+
+    ``max_retries`` limits how many times the system will auto-rework
+    before escalating to ``retry_exhausted_action``.
+
+    ``retry_exhausted_action`` — what to do when retries are exhausted:
+    - ``"skip_shot"`` — auto-skip the failing shots and continue
+    - ``"change_provider"`` — switch to a different video provider and retry
+    - ``"human_review"`` — block and wait for human intervention
+
+    ``depth`` — how deep the rework goes:
+    - ``"shallow"`` — restart only the ``back_to`` stage; keep upstream
+      outputs (e.g. keep selected_image when redoing generate_videos)
+    - ``"deep"`` — cascade to upstream stages too (future use)
+
+    ``reason`` is surfaced to front-end so the user sees *why* they're
+    being sent back.
+    """
+
+    condition: Condition
+    back_to: str
+    scope: str = "affected"  # "affected" | "all"
+    max_retries: int = 3
+    retry_exhausted_action: str = "skip_shot"  # "skip_shot" | "human_review"
+    depth: str = "shallow"  # "shallow" | "deep"
+    reason: str = ""
+
+
 class ProductionPolicy(BaseModel):
     """Complete specification for one production stage."""
 
@@ -87,6 +120,7 @@ class ProductionPolicy(BaseModel):
     gates: tuple[GateRule, ...] = ()
     status_rules: tuple[StatusRule, ...] = ()
     progress_metric: str = ""
+    rework_triggers: tuple[ReworkTrigger, ...] = ()
 
 
 # ── Helper constructors ─────────────────────────────────────────────────────
@@ -102,6 +136,22 @@ def _g(metric: str, op: str, expected: Any, missing_item: str, reason: str) -> G
 
 def _r(status: str, *conditions: Condition) -> StatusRule:
     return StatusRule(status=status, conditions=list(conditions))
+
+
+def _rework(back_to: str, metric: str, op: str, expected: Any = None, *,
+            scope: str = "affected", max_retries: int = 3,
+            retry_exhausted_action: str = "skip_shot", depth: str = "shallow",
+            reason: str = "") -> ReworkTrigger:
+    """Shortcut to build a rework trigger."""
+    return ReworkTrigger(
+        condition=Condition(metric=metric, op=Op(op), expected=expected),
+        back_to=back_to,
+        scope=scope,
+        max_retries=max_retries,
+        retry_exhausted_action=retry_exhausted_action,
+        depth=depth,
+        reason=reason,
+    )
 
 
 # ── Reusable gates ──────────────────────────────────────────────────────────
@@ -160,6 +210,16 @@ PRODUCTION_POLICIES: tuple[ProductionPolicy, ...] = (
         ),
         status_rules=(_r("completed", _c("image_generation_complete", "truthy")),),
         progress_metric="selected_image_count",
+        rework_triggers=(
+            _rework(
+                back_to="generate_keyframes",
+                metric="image_review_blocking_count",
+                op=">",
+                expected=0,
+                scope="affected",
+                reason="关键帧审查发现不合格镜头，返回生成关键帧阶段重做。",
+            ),
+        ),
     ),
     ProductionPolicy(
         id="generate_videos",
@@ -184,9 +244,20 @@ PRODUCTION_POLICIES: tuple[ProductionPolicy, ...] = (
         gates=(
             _g("video_task_failed_count", ">", 0, "video_task_failures", "Failed video tasks must be resolved before video review."),
             _g("video_tasks_or_selected_videos", "all_zero", ("video_task_count", "selected_video_count"), "video_tasks_or_selected_videos", "Video generation must run before video review."),
+            _g("video_review_blocking_count", ">", 0, "video_review_blockers", "视频审查发现不合格镜头，需要先重做视频片段，再进入最终剪辑。"),
         ),
         status_rules=(_r("completed", _c("video_generation_complete", "truthy")),),
         progress_metric="selected_video_count",
+        rework_triggers=(
+            _rework(
+                back_to="generate_videos",
+                metric="video_review_blocking_count",
+                op=">",
+                expected=0,
+                scope="affected",
+                reason="视频审查发现不合格镜头，返回生成视频阶段重做。",
+            ),
+        ),
     ),
     ProductionPolicy(
         id="audio_subtitles",

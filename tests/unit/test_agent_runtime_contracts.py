@@ -108,7 +108,21 @@ def test_runtime_requirement_blocks_missing_provider_capability():
         ensure_runtime_requirements("generate_videos", context)
 
 
-def test_runtime_requirement_allows_seedance_video_capability():
+def test_runtime_requirement_allows_ltx23_video_capability():
+    context = {
+        "runtime_features": [
+            "video_generation",
+            "provider_status_observation",
+            "selected_video_writeback",
+        ],
+        "provider_capabilities": ["ltx23_image_to_video"],
+        "capability_versions": {"generate_videos": "2026-05-27.v1"},
+    }
+
+    ensure_runtime_requirements("generate_videos", context)
+
+
+def test_runtime_requirement_keeps_seedance_video_capability_compatible():
     context = {
         "runtime_features": [
             "video_generation",

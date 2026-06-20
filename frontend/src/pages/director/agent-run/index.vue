@@ -335,7 +335,7 @@ function buildFreshProductionParams(goal: string) {
     clean_start: true,
     entrypoint: '/director/agent-run',
     image_provider: 'seedream',
-    video_provider: 'ltx2.3',
+    video_provider: 'joy-echo',
     target_duration_sec: duration,
     max_image_tasks: duration >= 30 ? 8 : 4,
     max_video_tasks: duration >= 30 ? 6 : 3,

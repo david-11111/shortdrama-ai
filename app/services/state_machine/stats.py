@@ -31,6 +31,8 @@ class StatsAccumulator:
         self._selected_video_count: int = 0
         self._image_review_blocking: int = 0
         self._video_review_blocking: int = 0
+        self._image_blocking_shots: list[int] = []
+        self._video_blocking_shots: list[int] = []
 
         # Task counters
         self._image_total: int = 0
@@ -58,7 +60,11 @@ class StatsAccumulator:
     # ── Shot processing ─────────────────────────────────────────────────
 
     def add_shot(self, shot: dict[str, Any]) -> None:
+        # 跳过被用户标记为"跳过"的镜头（skip_shot）
+        if not shot.get("selected", True):
+            return
         self._shot_count += 1
+        shot_index = int(shot.get("shot_index") or 0)
         if str(shot.get("prompt") or "").strip():
             self._prompt_count += 1
         if str(shot.get("selected_image") or "").strip():
@@ -67,8 +73,10 @@ class StatsAccumulator:
             self._selected_video_count += 1
         if self._is_review_blocking(shot, "image"):
             self._image_review_blocking += 1
+            self._image_blocking_shots.append(shot_index)
         if self._is_review_blocking(shot, "video"):
             self._video_review_blocking += 1
+            self._video_blocking_shots.append(shot_index)
 
     @staticmethod
     def _is_review_blocking(shot: dict[str, Any], media_type: str) -> bool:
@@ -84,13 +92,19 @@ class StatsAccumulator:
             if media_type == "image"
             else ("video_variants", "video_candidates")
         )
+        selected_url = str(shot.get(f"selected_{media_type}") or "").strip()
         for key in list_keys:
             val = shot.get(key)
-            if isinstance(val, list) and any(
-                StatsAccumulator._candidate_review_blocking(item)
-                for item in val
-                if isinstance(item, dict)
-            ):
+            if not isinstance(val, list):
+                continue
+            candidates = [item for item in val if isinstance(item, dict)]
+            selected_candidates = [
+                item
+                for item in candidates
+                if selected_url and StatsAccumulator._candidate_matches_selected(item, selected_url)
+            ]
+            review_candidates = selected_candidates or candidates
+            if any(StatsAccumulator._candidate_review_blocking(item) for item in review_candidates):
                 return True
         return False
 
@@ -102,6 +116,13 @@ class StatsAccumulator:
             return True
         review = candidate.get("review") if isinstance(candidate.get("review"), dict) else {}
         return str(review.get("status") or "").strip().lower() in blocking_statuses
+
+    @staticmethod
+    def _candidate_matches_selected(candidate: dict[str, Any], selected_url: str) -> bool:
+        for key in ("url", "image_url", "video_url", "selected_image", "selected_video"):
+            if str(candidate.get(key) or "").strip() == selected_url:
+                return True
+        return False
 
     # ── Task processing ─────────────────────────────────────────────────
 
@@ -182,6 +203,8 @@ class StatsAccumulator:
             "selected_video_count": self._selected_video_count,
             "image_review_blocking_count": self._image_review_blocking,
             "video_review_blocking_count": self._video_review_blocking,
+            "image_blocking_shots": self._image_blocking_shots,
+            "video_blocking_shots": self._video_blocking_shots,
             "image_task_count": self._image_total,
             "image_task_active_count": self._image_active,
             "image_task_done_count": self._image_done,

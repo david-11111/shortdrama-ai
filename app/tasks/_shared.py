@@ -39,15 +39,15 @@ def _clear_dispatch_receipt(task_id: str) -> None:
 LOGGER = logging.getLogger(__name__)
 
 
-def acquire_task_lock(task_id: str, ttl_seconds: int = 1800) -> bool:
+def acquire_task_lock(task_id: str, ttl_seconds: int = 3600) -> bool:
     """Attempt to acquire an idempotency lock for a task in broker Redis.
 
     Returns False if another worker is already executing this task
     (the reconciler may have re-dispatched a message that was merely
     delayed). The caller should ACK and return immediately on False.
 
-    Lock is auto-released after *ttl_seconds* (default 30 min — covers
-    the typical WAN2.1/Seedance generation window).
+    Lock is auto-released after *ttl_seconds* (default 60 min — covers
+    the full WAN2.1/Seedance generation window including queue wait).
     """
     try:
         client = SyncRedis.from_url(
@@ -483,14 +483,34 @@ def _build_task_agent_event(
 
 
 def _agent_event_actor(task_type: str, data: dict[str, Any]) -> str:
+    """Determine the actor name from task metadata.
+
+    Checks registered video providers first, then falls back to hardcoded
+    non-video providers (deepseek, doubao, seedream, ffmpeg).
+    """
     text_value = f"{data.get('tool') or ''} {data.get('provider') or ''} {task_type}".lower()
-    for actor in ("deepseek", "doubao", "seedream", "seedance", "kling", "ffmpeg"):
+
+    # Check registered video providers first
+    from app.services.video_provider import get_config
+    for word in text_value.split():
+        for candidate in (word, word.replace("_", "-")):
+            cfg = get_config(candidate)
+            if cfg:
+                return cfg.name
+
+    # Non-video providers
+    for actor in (
+        "deepseek",
+        "doubao",
+        "seedream",
+        "ffmpeg",
+    ):
         if actor in text_value:
             return actor
     if "image" in text_value:
         return "seedream"
     if "video" in text_value:
-        return "seedance"
+        return "joy-echo"
     if "script" in text_value or "director" in text_value:
         return "doubao"
     return "executor"
@@ -814,12 +834,22 @@ def _task_event_title(context: dict[str, Any], payload: dict[str, Any]) -> str:
 
 def _provider_label(tool: str, task_type: str = "") -> str:
     text_value = f"{tool} {task_type}".lower()
-    if "kling" in text_value:
-        return "Kling \u89c6\u9891"
+
+    # Check registered video providers
+    from app.services.video_provider import get_config
+    for word in text_value.split():
+        for candidate in (word, word.replace("_", "-")):
+            cfg = get_config(candidate)
+            if cfg:
+                labels = {"joy-echo": "Joy-Echo \u89c6\u9891", "ltx2.3": "LTX 2.3 \u89c6\u9891",
+                          "seedance": "Seedance \u89c6\u9891", "kling": "Kling \u89c6\u9891",
+                          "wan2.1": "Wan2.1 \u89c6\u9891", "comfyui": "ComfyUI"}
+                return labels.get(cfg.name, f"{cfg.name} \u89c6\u9891")
+
     if "seedream" in text_value or "image" in text_value:
         return "Seedream \u51fa\u56fe"
-    if "seedance" in text_value or "video" in text_value:
-        return "Seedance \u89c6\u9891"
+    if "video" in text_value:
+        return "Joy-Echo \u89c6\u9891"
     if "doubao" in text_value or "script" in text_value or "director" in text_value:
         return "\u8c46\u5305\u5267\u672c/\u5bfc\u6f14"
     return tool or task_type or "\u5de5\u5177"
@@ -1158,15 +1188,71 @@ async def update_shot_error(
     error: str,
     *,
     status: str = "error",
+    preserve_selected_video: bool = False,
 ) -> None:
     if not project_id or not shot_index:
         return
-    await _update_shot_row(
-        project_id,
-        shot_index,
-        user_id,
-        {"status": status, "last_error": error[:500]},
-    )
+    terminal_statuses = ["video_done", "image_done", "done"]
+    if preserve_selected_video:
+        user_pk = int(user_id) if str(user_id).isdigit() else 0
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        UPDATE shot_rows
+                        SET status = CASE
+                                WHEN selected_video IS NOT NULL AND selected_video <> '' THEN 'video_done'
+                                ELSE :status
+                            END,
+                            last_error = :last_error,
+                            updated_at = NOW()
+                        WHERE project_id = :project_id
+                          AND user_id = :user_id
+                          AND shot_index = :shot_index
+                          AND status <> ALL(:terminal_statuses)
+                        """
+                    ),
+                    {
+                        "project_id": project_id,
+                        "user_id": user_pk,
+                        "shot_index": shot_index,
+                        "status": status,
+                        "last_error": error[:500],
+                        "terminal_statuses": terminal_statuses,
+                    },
+                )
+                if int(result.rowcount or 0) <= 0:
+                    raise RuntimeError(
+                        f"Shot row error writeback missed: project_id={project_id} "
+                        f"user_id={user_pk} shot_index={shot_index}"
+                    )
+    else:
+        user_pk = int(user_id) if str(user_id).isdigit() else 0
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                result = await session.execute(
+                    text(
+                        """
+                        UPDATE shot_rows
+                        SET status = :status,
+                            last_error = :last_error,
+                            updated_at = NOW()
+                        WHERE project_id = :project_id
+                          AND user_id = :user_id
+                          AND shot_index = :shot_index
+                          AND status <> ALL(:terminal_statuses)
+                        """
+                    ),
+                    {
+                        "project_id": project_id,
+                        "user_id": user_pk,
+                        "shot_index": shot_index,
+                        "status": status,
+                        "last_error": error[:500],
+                        "terminal_statuses": terminal_statuses,
+                    },
+                )
     try:
         from app.services.project_workspace import write_project_workspace_file
 
@@ -1207,15 +1293,48 @@ async def _update_shot_row(
 
     for field, value in updates.items():
         if field in json_fields:
-            assignments.append(f"{field} = COALESCE({field}, '[]'::jsonb) || CAST(:{field} AS JSONB)")
-            params[field] = json.dumps(value, ensure_ascii=False)
+            # 幂等写入：如果 JSONB 数组中已有同 url 的项，替换它；否则追加
+            url_key = "video_url" if "video" in field else "image_url"
+            items_json = json.dumps(value, ensure_ascii=False)
+            assignments.append(
+                f"{field} = COALESCE({field}, '[]'::jsonb) || CAST(:{field} AS JSONB)"
+            )
+            params[field] = value
+            # 只在有 url_key 时去重，没有 url_key 的 fallback 保留原拼接行为
+            if url_key and isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict) and value[0].get(url_key):
+                single_url = value[0][url_key]
+                # 用 jsonb_set + 位置查找去重：如果找到同 url 的项，替换；否则不做额外操作（|| 已追加）
+                dedup_sql = f"""
+                    {field} = (
+                        SELECT CASE
+                            WHEN EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(COALESCE({field}, '[]'::jsonb))
+                                WHERE value->>'{url_key}' = :dedup_url_{field}
+                            )
+                            THEN (
+                                SELECT jsonb_agg(
+                                    CASE
+                                        WHEN item->>'{url_key}' = :dedup_url_{field}
+                                        THEN (CAST(:dedup_val_{field} AS JSONB) -> 0)
+                                        ELSE item
+                                    END
+                                )
+                                FROM jsonb_array_elements(COALESCE({field}, '[]'::jsonb)) AS item
+                            )
+                            ELSE COALESCE({field}, '[]'::jsonb) || CAST(:{field} AS JSONB)
+                        END
+                    )
+                """
+                assignments[-1] = dedup_sql
+                params[f"dedup_url_{field}"] = single_url
+                params[f"dedup_val_{field}"] = items_json
         else:
             assignments.append(f"{field} = :{field}")
             params[field] = value
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            await session.execute(
+            result = await session.execute(
                 text(
                     f"""
                     UPDATE shot_rows
@@ -1227,3 +1346,8 @@ async def _update_shot_row(
                 ),
                 params,
             )
+            if int(result.rowcount or 0) <= 0:
+                raise RuntimeError(
+                    f"Shot row writeback missed: project_id={project_id} "
+                    f"user_id={user_pk} shot_index={shot_index}"
+                )

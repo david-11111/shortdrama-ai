@@ -3,7 +3,7 @@ import type { AxiosProgressEvent } from 'axios'
 
 // ── 项目 ──
 export const createProject = (payload: { name: string; input_path?: string }) =>
-  client.post('/projects', payload)
+  client.post('/projects', payload, { timeout: 180000 })
 
 export const listProjects = () =>
   client.get('/projects')
@@ -27,6 +27,7 @@ export const continueProjectBrain = (projectId: string, data?: {
   action?: string
   instruction?: string
   mode?: 'preview' | 'step' | 'autopilot'
+  shot_indices?: number[]
   estimated_max_credits?: number
   allowed_max_credits?: number
 }) => client.post(`/projects/${projectId}/brain/continue`, data || {})

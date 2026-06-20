@@ -45,6 +45,8 @@ function openPreview(url: string) {
 const actorLabel = computed(() => {
   const actor = (props.message.actor || '').toLowerCase()
   if (actor === 'seedream') return 'Seedream'
+  if (actor === 'joy-echo' || actor === 'joy_echo' || actor === 'joyai-echo' || actor === 'joyai_echo') return 'Joy-Echo'
+  if (actor === 'ltx2.3' || actor === 'ltx') return 'LTX 2.3'
   if (actor === 'seedance') return 'Seedance'
   return actor || 'Provider'
 })
@@ -152,7 +154,7 @@ const timeLabel = computed(() => {
   border-radius: 50%;
   background: #0d1117;
   color: #e6edf3;
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
   display: grid;
   place-content: center;

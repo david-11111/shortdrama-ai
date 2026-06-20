@@ -11,6 +11,7 @@ from app.services.production_entrypoint import assert_agent_run_entrypoint_for_t
 from app.services.ref_resolver import build_video_generation_payload
 from app.services.seedance import PolicyViolationError, sanitize_prompt
 from app.services.error_policy import classify_exception
+from app.services.video_provider import dispatch as router_dispatch, get_config
 from app.tasks._shared import (
     acquire_task_lock,
     build_retry_delay,
@@ -35,6 +36,33 @@ from app.tasks._shared import (
 MAX_RETRIES = 3
 
 
+def _writeback_video(
+    task_id: str,
+    user_id: str,
+    shot_row_data: dict[str, Any] | None,
+    url: str,
+    transaction_id: str | None = None,
+) -> None:
+    """统一写回 shot_rows + 计费（3 条 provider 路径的重复代码合并）。"""
+    import asyncio
+
+    if shot_row_data:
+        review = review_video_candidate(shot_row_data, url)
+        asyncio.run(update_shot_media(
+            str(shot_row_data.get("project_id") or ""),
+            int(shot_row_data.get("shot_index") or 0),
+            str(shot_row_data.get("user_id") or user_id),
+            video_url=url,
+            video_candidate=media_candidate(url, review),
+            status="video_done",
+        ))
+        publish_task_agent_event(task_id, "writeback", {
+            "shot_index": shot_row_data.get("shot_index"), "field": "selected_video",
+        })
+    if transaction_id:
+        maybe_charge(transaction_id)
+
+
 @celery_app.task(bind=True, queue="video", soft_time_limit=1500, time_limit=1800, acks_late=True)
 def generate_video_task(
     self,
@@ -53,6 +81,8 @@ def generate_video_task(
     locked_this_run = False
     if acquire_task_lock(task_id):
         locked_this_run = True
+    else:
+        return {"status": "duplicate", "task_id": task_id}
 
     try:
         publish_progress(
@@ -71,6 +101,10 @@ def generate_video_task(
                 payload,
                 db_run_id=str((snapshot or {}).get("run_id") or "").strip() or None,
             )
+            provider = str(payload.get("provider", "joy-echo")).lower()
+            cfg = get_config(provider)
+            text_only_provider = cfg.text_only if cfg else False
+
             shot_row_data = payload.get("shot_row")
             if shot_row_data:
                 if shot_row_data.get("image_url") and not shot_row_data.get("selected_image"):
@@ -80,80 +114,30 @@ def generate_video_task(
                     payload["prompt"] = resolved["prompt"]
                 if resolved.get("duration"):
                     payload["duration"] = resolved["duration"]
-                if resolved.get("image") and not payload.get("image_url"):
+                if not text_only_provider and resolved.get("image") and not payload.get("image_url"):
                     payload["image_url"] = resolved["image"]
-                if resolved.get("subject_reference"):
+                if not text_only_provider and resolved.get("subject_reference"):
                     payload.setdefault("ref_images", []).extend(resolved["subject_reference"])
 
-            provider = str(payload.get("provider", "ltx2.3")).lower()
             payload = adapt_provider_payload(payload, task_type="video_gen", provider=provider)
+            if text_only_provider:
+                payload.pop("image_url", None)
+                payload.pop("ref_images", None)
 
-            # ── ComfyUI 本地视频生成（LTX / Wan2.1，不走 key_pool）──
-            comfy_providers = {"ltx2.3", "ltx", "wan", "wan2.1", "wan2_1", "comfyui"}
-            if provider in comfy_providers:
-                from app.services.comfy_video import generate_comfy_video
-
-                publish_task_agent_event(task_id, "tool_call", {"tool": provider, "action": "comfyui_submit"})
-                publish_progress(
-                    task_id, status="running", progress=15,
-                    stage_text=f"Calling ComfyUI ({provider})",
-                    retry_count=self.request.retries,
-                    celery_task_id=self.request.id,
-                )
-                result = generate_comfy_video(payload, provider=provider)
-                publish_task_agent_event(task_id, "tool_result", {
-                    "tool": provider, "url": str(result.get("url", ""))[:120],
-                })
-                # ComfyUI 不走 key_pool，直接写回 + 完成
-                shot_row_data = payload.get("shot_row")
-                if shot_row_data:
-                    url = result_url(result)
-                    review = review_video_candidate(shot_row_data, url)
-                    import asyncio
-                    asyncio.run(update_shot_media(
-                        str(shot_row_data.get("project_id") or ""),
-                        int(shot_row_data.get("shot_index") or 0),
-                        user_id,
-                        video_url=url,
-                        video_candidate=media_candidate(url, review),
-                        status="video_done",
-                    ))
-                    publish_task_agent_event(task_id, "writeback", {
-                        "shot_index": shot_row_data.get("shot_index"), "field": "selected_video",
-                    })
-                if transaction_id:
-                    maybe_charge(transaction_id)
-                publish_progress(task_id, status="running", progress=100,
-                    stage_text=f"ComfyUI ({provider}) video generation complete",
-                    retry_count=self.request.retries, celery_task_id=self.request.id)
-                publish_complete(task_id, result, celery_task_id=self.request.id)
-                return result
-
-            # ── 传统 provider（Seedance / Kling，走 key_pool）──
-            service_map = {
-                "seedance": ("app.services.seedance", "seedance"),
-                "kling": ("app.services.kling", "kling"),
-            }
-            module_name, pool_service = service_map.get(provider, ("app.services.seedance", "seedance"))
-
-            key_name, api_key = key_pool.acquire(pool_service)
-            publish_task_agent_event(task_id, "tool_call", {"tool": provider, "action": "acquire_key"})
-            publish_task_agent_event(task_id, "tool_result", {"tool": "key_pool", "key_name": key_name})
+            # ── 通过统一路由层调用（换 provider 只需换 payload 里的 provider 名）──
+            publish_task_agent_event(task_id, "tool_call", {"tool": provider, "action": f"{provider}_submit"})
             publish_progress(
-                task_id,
-                status="running",
-                progress=15,
+                task_id, status="running", progress=15,
                 stage_text=f"Calling {provider}",
                 retry_count=self.request.retries,
                 celery_task_id=self.request.id,
             )
-            call = resolve_callable(module_name, ("generate_video", "generate"))
-            publish_task_agent_event(task_id, "tool_call", {"tool": provider, "prompt": str(payload.get("prompt", ""))[:50]})
             _t0 = time.time()
 
+            # Seedance 特殊处理：PolicyViolation 重试 + sanitize
             if provider == "seedance":
                 try:
-                    result = invoke_callable(call, payload, api_key=api_key, task_id=task_id, user_id=user_id)
+                    result = router_dispatch(payload)
                 except PolicyViolationError:
                     payload["prompt"] = sanitize_prompt(payload.get("prompt", ""))
                     publish_progress(
@@ -165,47 +149,37 @@ def generate_video_task(
                         celery_task_id=self.request.id,
                     )
                     try:
-                        result = invoke_callable(call, payload, api_key=api_key, task_id=task_id, user_id=user_id)
+                        result = router_dispatch(payload)
                     except PolicyViolationError:
                         payload.pop("image_url", None)
                         payload.pop("ref_images", None)
-                        result = invoke_callable(call, payload, api_key=api_key, task_id=task_id, user_id=user_id)
+                        result = router_dispatch(payload)
             else:
-                result = invoke_callable(call, payload, api_key=api_key, task_id=task_id, user_id=user_id)
-            result = persist_result_to_oss(result, "video")
-            publish_task_agent_event(task_id, "tool_result", {
-                "tool": provider, "url": str(result.get("url", ""))[:120], "duration_ms": int((time.time() - _t0) * 1000),
-            })
-            publish_task_agent_event(task_id, "artifact", {
-                "type": "video", "size": result.get("file_size", 0), "duration": payload.get("duration", 5),
-            })
-            if shot_row_data:
-                import asyncio
-                url = result_url(result)
-                review = review_video_candidate(shot_row_data, url)
+                result = router_dispatch(payload)
 
-                asyncio.run(update_shot_media(
-                    str(shot_row_data.get("project_id") or ""),
-                    int(shot_row_data.get("shot_index") or 0),
-                    user_id,
-                    video_url=url,
-                    video_candidate=media_candidate(url, review),
-                    status="video_done",
-                ))
-                publish_task_agent_event(task_id, "writeback", {
-                    "shot_index": shot_row_data.get("shot_index"), "field": "selected_video",
-                })
-            maybe_charge(transaction_id)
+            # 对走 key_pool 的 provider 做 OSS 持久化
+            if cfg and cfg.needs_key:
+                result = persist_result_to_oss(
+                    {"url": result["url"], **result.get("extra", {})}, "video"
+                )
+                url = result_url(result)
+            else:
+                url = result["url"]
+
+            publish_task_agent_event(task_id, "tool_result", {
+                "tool": provider, "url": url[:120],
+                "duration_ms": int((time.time() - _t0) * 1000),
+            })
+
+            _writeback_video(task_id, user_id, shot_row_data, url, transaction_id)
+
             publish_progress(
-                task_id,
-                status="running",
-                progress=100,
+                task_id, status="running", progress=100,
                 stage_text=f"{provider} video generation complete",
-                retry_count=self.request.retries,
-                celery_task_id=self.request.id,
+                retry_count=self.request.retries, celery_task_id=self.request.id,
             )
-            publish_complete(task_id, result, celery_task_id=self.request.id)
-            return result
+            publish_complete(task_id, {"url": url}, celery_task_id=self.request.id)
+            return {"url": url}
         except Exception as exc:
             error_decision = classify_exception(exc)
             retryable = error_decision.retryable
@@ -241,7 +215,8 @@ def generate_video_task(
                     raise self.retry(
                         exc=exc,
                         countdown=build_retry_delay(self.request.retries),
-                        args=(task_id, user_id, adjusted_payload, transaction_id),
+                        args=(task_id, user_id, adjusted_payload),
+                        kwargs={"transaction_id": transaction_id},
                     )
 
             refunded = maybe_refund(transaction_id)
@@ -253,9 +228,10 @@ def generate_video_task(
                 asyncio.run(update_shot_error(
                     str(shot_row_data.get("project_id") or ""),
                     int(shot_row_data.get("shot_index") or 0),
-                    user_id,
+                    str(shot_row_data.get("user_id") or user_id),
                     error_text,
                     status="image_done" if shot_row_data.get("selected_image") else "error",
+                    preserve_selected_video=True,
                 ))
             publish_failed(
                 task_id,

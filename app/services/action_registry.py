@@ -56,7 +56,7 @@ REGISTRY: dict[str, ActionRegistration] = {
     ),
     "generate_videos": ActionRegistration(
         name="generate_videos",
-        label="Generate video clips (Seedance/Kling)",
+        label="Generate video clips (LTX 2.3)",
         lane="c_lane_production",
         node_id="generate_videos",
         allowed_writes=["tasks", "shot_rows", "agent_events", "agent_runs"],
@@ -66,7 +66,7 @@ REGISTRY: dict[str, ActionRegistration] = {
             "provider_status_observation",
             "selected_video_writeback",
         ],
-        requires_providers=["seedance_image_to_video"],
+        requires_providers=["ltx23_image_to_video"],
     ),
     "plan_final_edit": ActionRegistration(
         name="plan_final_edit",

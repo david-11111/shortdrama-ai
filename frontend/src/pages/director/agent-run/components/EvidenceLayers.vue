@@ -156,9 +156,9 @@ function unwrap(item: unknown): Record<string, any> {
   grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
   height: 100%;
-  background: #0b0b0c;
-  border: 1px solid #3f3f46;
-  border-radius: 7px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -168,7 +168,7 @@ function unwrap(item: unknown): Record<string, any> {
   justify-content: space-between;
   gap: 12px;
   padding: 16px 18px;
-  border-bottom: 1px solid #27272a;
+  border-bottom: 1px solid #21262d;
 }
 
 h2,
@@ -196,14 +196,14 @@ p {
 .layer-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-bottom: 1px solid #27272a;
+  border-bottom: 1px solid #21262d;
 }
 
 .layer-tabs button {
   min-width: 0;
   border: 0;
-  border-right: 1px solid #18181b;
-  background: #0b0b0c;
+  border-right: 1px solid #21262d;
+  background: #0d1117;
   padding: 10px 8px;
   text-align: left;
   cursor: pointer;
@@ -211,7 +211,7 @@ p {
 
 .layer-tabs button.active,
 .layer-tabs button:hover {
-  background: #18181b;
+  background: #161b22;
 }
 
 .layer-tabs strong,
@@ -265,16 +265,16 @@ p {
   grid-template-columns: 26px minmax(100px, 0.42fr) minmax(0, 1fr);
   gap: 9px;
   align-items: center;
-  border: 1px solid #27272a;
-  border-radius: 7px;
-  background: #050505;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  background: #0d1117;
   padding: 9px 10px;
   text-align: left;
   cursor: pointer;
 }
 
 .layer-item:hover {
-  border-color: #f97316;
+  border-color: #58a6ff;
 }
 
 .layer-item span {

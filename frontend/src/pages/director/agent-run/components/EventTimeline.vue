@@ -125,6 +125,8 @@ const activeLane = computed(() => {
   if (actor === 'deepseek') return 'DeepSeek'
   if (actor === 'executor') return '执行器'
   if (actor === 'seedream') return 'Seedream'
+  if (actor === 'joy-echo' || actor === 'joy_echo' || actor === 'joyai-echo' || actor === 'joyai_echo') return 'Joy-Echo'
+  if (actor === 'ltx2.3' || actor === 'ltx') return 'LTX 2.3'
   if (actor === 'seedance') return 'Seedance'
   if (actor === 'state_machine') return '状态机'
   return 'Agent'
@@ -186,9 +188,9 @@ function normalizeMainEvent(event: TimelineEvent): TimelineEvent | null {
 
   if (isProviderWaitingEvent(event)) {
     return publicEvent(event, {
-      actor: actor || 'seedance',
+      actor: actor || 'ltx2.3',
       event_type: 'progress',
-      title: 'Seedance 暂时繁忙',
+      title: 'LTX 2.3 暂时繁忙',
       detail: providerWaitingDetail(summary || detail || reason || title),
       status: 'provider_waiting',
     })
@@ -313,7 +315,7 @@ function writebackSummary(rows: TimelineEvent[], kind: 'image' | 'video'): Timel
   const isImage = kind === 'image'
   return publicEvent(latest, {
     id: `main-${kind}-writeback-${rows.length}-${latest.id}`,
-    actor: isImage ? 'seedream' : 'seedance',
+    actor: isImage ? 'seedream' : 'ltx2.3',
     event_type: 'writeback_summary',
     title: isImage ? '关键帧已写回' : '视频片段已写回',
     detail: shotIndexes
@@ -349,7 +351,7 @@ function dispatchTitle(value: string) {
   const text = value.toLowerCase()
   if (containsAny(text, ['keyframe', '关键帧', '出图', 'seedream'])) return '已派发关键帧生成'
   if (containsAny(text, ['final_edit', 'plan_final_edit', '剪辑', '成片', '导出', 'export'])) return '已派发剪辑成片'
-  if (containsAny(text, ['video', '视频', 'seedance', 'kling'])) return '已派发视频生成'
+  if (containsAny(text, ['video', '视频', 'ltx', 'seedance', 'kling'])) return '已派发视频生成'
   if (containsAny(text, ['diagnostic', '诊断'])) return '执行诊断建议'
   return '已派发生产任务'
 }
@@ -405,7 +407,7 @@ function readableDetail(value: string) {
     .filter((part) => !isEvidenceText(part))
   if (readableParts.length) return readableParts.join('。')
   if (isEvidenceText(text)) return ''
-  if (/queue\s+\d+.*seedance.*credits?|剩余预算|预算/i.test(text)) return '本次预算不足，部分生产任务没有派发。'
+  if (/queue\s+\d+.*(ltx|seedance).*credits?|剩余预算|预算/i.test(text)) return '本次预算不足，部分生产任务没有派发。'
   if (/provider\s+key\s+饱和|saturated|backpressure|too many requests|429|rate limit/i.test(text)) return 'Provider 暂时繁忙，任务已进入等待恢复状态。'
   return stageLabel(text)
 }
@@ -531,7 +533,7 @@ function isEvidenceText(value: string) {
   gap: 18px;
   border-bottom: 1px solid #30363d;
   background: rgba(13, 17, 23, 0.96);
-  padding: 20px 28px 18px;
+  padding: 14px 28px 12px;
 }
 
 h1,
@@ -541,20 +543,24 @@ p {
 
 h1 {
   color: #e6edf3;
-  font-size: 19px;
-  line-height: 1.35;
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 500;
 }
 
 p {
-  margin-top: 5px;
+  margin-top: 3px;
   color: #8b949e;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .eyebrow {
-  margin: 0 0 6px;
+  margin: 0 0 4px;
   color: #58a6ff;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
 }
 
 .timeline-header button {
@@ -574,13 +580,13 @@ p {
 
 .workflow-summary {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   max-width: 980px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
   border: 1px solid #30363d;
   border-radius: 8px;
   background: #161b22;
-  padding: 14px;
+  padding: 10px 14px;
 }
 
 .workflow-summary.blocked {
@@ -589,16 +595,24 @@ p {
 
 .workflow-summary div {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .workflow-summary span {
   color: #8b949e;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .workflow-summary strong {
   color: #e6edf3;
+  font-size: 13px;
+}
+
+.workflow-summary p {
+  color: #f0c36a;
+  font-size: 11px;
+  margin: 0;
+  line-height: 1.4;
 }
 
 .stream {
@@ -642,7 +656,7 @@ p {
 
 .typing-row em {
   color: #8b949e;
-  font-size: 12px;
+  font-size: 11px;
   font-style: normal;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -29,6 +29,7 @@ from app.tasks._shared import (
     release_task_lock,
     result_url,
     resolve_callable,
+    update_shot_error,
     update_shot_media,
 )
 
@@ -56,6 +57,8 @@ def generate_image_task(
     locked_this_run = False
     if acquire_task_lock(task_id):
         locked_this_run = True
+    else:
+        return {"status": "duplicate", "task_id": task_id}
 
     publish_progress(
         task_id,
@@ -209,6 +212,18 @@ def generate_image_task(
                     )
 
         refunded = maybe_refund(transaction_id)
+        shot_row_data = payload.get("shot_row")
+        if shot_row_data:
+            import asyncio
+
+            error_text = str(exc)
+            asyncio.run(update_shot_error(
+                str(shot_row_data.get("project_id") or ""),
+                int(shot_row_data.get("shot_index") or 0),
+                user_id,
+                error_text,
+                status="image_done" if shot_row_data.get("selected_image") else "error",
+            ))
         publish_failed(
             task_id,
             exc,

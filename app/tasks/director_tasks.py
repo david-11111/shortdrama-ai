@@ -107,7 +107,7 @@ async def _run_video_production(payload: dict[str, Any]) -> dict[str, Any]:
             allow_local_placeholders=bool(payload.get("allow_local_placeholders", False)),
             provider_mode=str(payload.get("provider_mode") or "local"),
             image_provider=str(payload.get("image_provider") or "seedream"),
-            video_provider=str(payload.get("video_provider") or "ltx2.3"),
+            video_provider=str(payload.get("video_provider") or "joy-echo"),
             wait_provider_timeout_sec=int(payload.get("wait_provider_timeout_sec") or 1800),
             max_image_tasks=int(payload.get("max_image_tasks") or 3),
             max_video_tasks=int(payload.get("max_video_tasks") or 3),
@@ -538,7 +538,7 @@ def director_produce_task(
         project_id = payload.get("project_id", "")
         shot_indices = payload.get("shot_indices")
         skip_images = payload.get("skip_images", False)
-        provider = payload.get("provider", "ltx2.3")
+        provider = payload.get("provider", "joy-echo")
         anchor_locks = payload.get("anchor_locks") if isinstance(payload.get("anchor_locks"), dict) else {}
         semantic_control = {
             key: payload.get(key)
@@ -617,28 +617,49 @@ def director_produce_task(
                     vid_payload.setdefault("ref_images", []).append(img_result["url"])
                 vid_payload = adapt_provider_payload(vid_payload, task_type="video_gen", provider=provider)
 
-                service_map = {"seedance": ("app.services.seedance", "seedance"), "kling": ("app.services.kling", "kling")}
-                module_name, pool_service = service_map.get(provider, ("app.services.seedance", "seedance"))
-                vid_key_name, vid_api_key = key_pool.acquire(pool_service)
-                try:
-                    vid_call = resolve_callable(module_name, ("generate_video", "generate"))
-                    vid_result = invoke_callable(
-                        vid_call, vid_payload, api_key=vid_api_key, task_id=task_id, user_id=user_id,
-                    )
-                    vid_result = persist_result_to_oss(vid_result, "video")
-                    vid_url = result_url(vid_result)
-                    vid_review_payload = {**row_payload, "selected_image": vid_payload.get("image_url") or row_payload.get("selected_image")}
-                    vid_review = review_video_candidate(vid_review_payload, vid_url)
-                    asyncio.run(update_shot_media(
-                        project_id,
-                        int(row["shot_index"]),
-                        user_id,
-                        video_url=vid_url,
-                        video_candidate=media_candidate(vid_url, vid_review),
-                        status="video_done",
-                    ))
-                finally:
-                    key_pool.release(vid_key_name)
+                if provider in {
+                    "joy-echo",
+                    "joy_echo",
+                    "joyai-echo",
+                    "joyai_echo",
+                }:
+                    from app.services.joy_echo_official import generate_joy_echo_official_video
+
+                    vid_result = generate_joy_echo_official_video(vid_payload, provider=provider)
+                elif provider in {
+                    "ltx2.3",
+                    "ltx",
+                    "wan",
+                    "wan2.1",
+                    "wan2_1",
+                    "comfyui",
+                }:
+                    from app.services.comfy_video import generate_comfy_video
+
+                    vid_result = generate_comfy_video(vid_payload, provider=provider)
+                else:
+                    service_map = {"seedance": ("app.services.seedance", "seedance"), "kling": ("app.services.kling", "kling")}
+                    module_name, pool_service = service_map.get(provider, ("app.services.kling", "kling"))
+                    vid_key_name, vid_api_key = key_pool.acquire(pool_service)
+                    try:
+                        vid_call = resolve_callable(module_name, ("generate_video", "generate"))
+                        vid_result = invoke_callable(
+                            vid_call, vid_payload, api_key=vid_api_key, task_id=task_id, user_id=user_id,
+                        )
+                    finally:
+                        key_pool.release(vid_key_name)
+                vid_result = persist_result_to_oss(vid_result, "video")
+                vid_url = result_url(vid_result)
+                vid_review_payload = {**row_payload, "selected_image": vid_payload.get("image_url") or row_payload.get("selected_image")}
+                vid_review = review_video_candidate(vid_review_payload, vid_url)
+                asyncio.run(update_shot_media(
+                    project_id,
+                    int(row["shot_index"]),
+                    user_id,
+                    video_url=vid_url,
+                    video_candidate=media_candidate(vid_url, vid_review),
+                    status="video_done",
+                ))
 
                 results.append({"index": row["shot_index"], "image": img_result, "video": vid_result})
                 completed += 1

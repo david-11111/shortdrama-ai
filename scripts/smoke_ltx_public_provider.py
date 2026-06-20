@@ -48,7 +48,7 @@ def main() -> None:
             "steps": args.steps,
             "timeout_seconds": args.timeout_seconds,
         },
-        provider="wan2.1",
+        provider="ltx2.3",
     )
     print(json.dumps(result, ensure_ascii=False))
 

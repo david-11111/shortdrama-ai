@@ -265,7 +265,7 @@ function mapEventToMessage(event: any): ChatMessage | null {
       type: 'media_card',
       content: detail || summary || (mediaType === 'image' ? '关键帧已写回' : '视频片段已写回'),
       streaming: false,
-      actor: mediaType === 'image' ? 'seedream' : 'seedance',
+      actor: mediaType === 'image' ? 'seedream' : actor || 'joy-echo',
       timestamp,
       mediaType,
     }
@@ -290,7 +290,7 @@ function mapEventToMessage(event: any): ChatMessage | null {
       type: 'progress',
       content: detail || summary || 'Provider 暂时繁忙，等待恢复中...',
       streaming: false,
-      actor: actor || 'seedance',
+      actor: actor || 'joy-echo',
       timestamp,
       progressLabel: '等待 Provider 恢复',
     }
@@ -302,7 +302,7 @@ function mapEventToMessage(event: any): ChatMessage | null {
 function extractDispatchTitle(text: string): string {
   if (containsAny(text, ['keyframe', '关键帧', '出图', 'seedream'])) return '已派发关键帧生成'
   if (containsAny(text, ['final_edit', 'plan_final_edit', '剪辑', '成片', '导出', 'export'])) return '已派发剪辑成片'
-  if (containsAny(text, ['video', '视频', 'seedance', 'kling'])) return '已派发视频生成'
+  if (containsAny(text, ['video', '视频', 'ltx', 'seedance', 'kling'])) return '已派发视频生成'
   return '已派发生产任务'
 }
 

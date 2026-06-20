@@ -45,7 +45,7 @@ async def main() -> None:
         "mode": "step",
         "provider_mode": "real",
         "image_provider": "seedream",
-        "video_provider": "seedance",
+        "video_provider": "joy-echo",
         "max_image_tasks": 3,
         "max_video_tasks": 3,
         "wait_provider_timeout_sec": 1800,

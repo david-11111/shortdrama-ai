@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -214,6 +214,8 @@ def _resolve_input_video(source: str, out_path: Path) -> Path:
     path = Path(source)
     if source.startswith("/storage/"):
         path = Path("storage") / source.removeprefix("/storage/")
+    elif source.startswith("/api/media/local/ltx/"):
+        path = Path("storage") / "ltx_downloads" / unquote(source.rsplit("/", 1)[-1])
     elif source.startswith("/assets/"):
         path = Path("storage") / "projects" / source.removeprefix("/assets/")
     if not path.exists():

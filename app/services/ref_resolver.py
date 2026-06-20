@@ -230,7 +230,7 @@ def build_image_generation_payload(
     if strict and errors:
         raise RefResolutionError("; ".join(errors))
     prompt = apply_visual_quality_controls(str(shot_row.get("prompt") or ""), refs_pack=refs_payload)
-    return {
+    payload = {
         "prompt": build_image_prompt(prompt, refs_payload),
         "subject_reference": refs_payload["character"]["resolved_urls"],
         "scene_reference": refs_payload["scene"]["resolved_urls"],
@@ -239,6 +239,8 @@ def build_image_generation_payload(
         "style_reference": refs_payload["style"]["resolved_urls"],
         "refs": refs_payload,
     }
+    _copy_director_protocol(shot_row, payload)
+    return payload
 
 
 def build_video_generation_payload(
@@ -254,13 +256,15 @@ def build_video_generation_payload(
     selected_image = str(shot_row.get("selected_image") or "")
     prompt = apply_visual_quality_controls(str(shot_row.get("prompt") or ""), refs_pack=refs_payload)
     prompt = apply_video_motion_controls(prompt)
-    return {
+    payload = {
         "image": selected_image,
         "prompt": prompt,
         "duration": int(round(float(shot_row.get("duration") or 5.0))),
         "subject_reference": extract_video_ref_images(refs_payload, exclude_url=selected_image),
         "refs": refs_payload,
     }
+    _copy_director_protocol(shot_row, payload)
+    return payload
 
 
 def build_image_prompt(prompt: str, pack: dict) -> str:
@@ -304,6 +308,12 @@ def extract_video_ref_images(pack: dict, *, exclude_url: str | None = None) -> l
             seen.add(url)
             result.append(url)
     return result
+
+
+def _copy_director_protocol(source: dict, payload: dict) -> None:
+    protocol = source.get("director_input_protocol")
+    if isinstance(protocol, dict):
+        payload["director_input_protocol"] = protocol
 
 
 def refs_evidence(pack: dict) -> dict:

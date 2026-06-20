@@ -455,11 +455,14 @@ export const retryAgentRunFailedVideos = (runId: string, payload?: Record<string
 export const exportAgentRunPartial = (runId: string, payload?: Record<string, unknown>) =>
   client.post(`/agent-runs/${runId}/actions/export-partial`, payload || {})
 
-export const changeAgentRunProvider = (runId: string, payload: { provider: 'seedance' | 'kling' | 'ltx2.3' }) =>
+export const changeAgentRunProvider = (runId: string, payload: { provider: 'seedance' | 'kling' | 'joy-echo' | 'ltx2.3' }) =>
   client.post(`/agent-runs/${runId}/actions/change-provider`, payload)
 
 export const continueAgentRunStep = (runId: string, payload?: Record<string, unknown>) =>
   client.post(`/agent-runs/${runId}/actions/continue-step`, payload || {})
+
+export const skipShotAction = (runId: string, payload?: { shot_index?: number }) =>
+  client.post(`/agent-runs/${runId}/actions/skip-shot`, payload || {})
 
 export const previewAgentRunKeyframeBatch = (runId: string, payload: Record<string, unknown>) =>
   client.post(`/agent-runs/${runId}/actions/keyframe-batch/preview`, payload)
@@ -477,4 +480,4 @@ export const cancelAgentRun = (runId: string) =>
   client.post(`/agent-runs/${runId}/actions/cancel`)
 
 export const createAgentRun = (payload: CreateAgentRunPayload) =>
-  client.post<CreateAgentRunResponse>('/agent-runs', payload)
+  client.post<CreateAgentRunResponse>('/agent-runs', payload, { timeout: 180000 })

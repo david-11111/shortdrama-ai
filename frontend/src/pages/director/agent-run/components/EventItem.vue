@@ -124,6 +124,8 @@ const actorLabel = computed(() => {
   if (actor.value === 'state_machine') return '状态机'
   if (actor.value === 'executor') return '执行器'
   if (actor.value === 'seedream') return 'Seedream'
+  if (actor.value === 'joy-echo' || actor.value === 'joy_echo' || actor.value === 'joyai-echo' || actor.value === 'joyai_echo') return 'Joy-Echo'
+  if (actor.value === 'ltx2.3' || actor.value === 'ltx') return 'LTX 2.3'
   if (actor.value === 'seedance') return 'Seedance'
   if (actor.value === 'kling') return 'Kling'
   if (actor.value === 'ffmpeg') return 'FFmpeg'
@@ -231,12 +233,12 @@ em {
 
 strong {
   color: #e6edf3;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.45;
+  font-weight: 500;
 }
 
 time,
-p,
 button {
   color: #8b949e;
   font-size: 12px;
@@ -244,6 +246,8 @@ button {
 
 p {
   margin: 5px 0 0;
+  color: #8b949e;
+  font-size: 11px;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -311,7 +315,7 @@ p {
   border-radius: 50%;
   background: #0d1117;
   color: #e6edf3;
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
   display: grid;
   place-content: center;

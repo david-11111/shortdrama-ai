@@ -1,6 +1,8 @@
 import shutil
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -8,6 +10,110 @@ from app.routes import workbench
 from app.services.director_preflight import analyze_shot_risk
 from app.services import project_continue, project_workspace
 from app.routes.workbench import _dispatch_action_after_planning, _estimate_continue_credits, _keyframe_generation_targets, _split_final_edit_rows
+
+
+class _FakeGenerateBatchResult:
+    def __init__(self, rows=None):
+        self._rows = rows or []
+
+    def fetchall(self):
+        return self._rows
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        if not self._rows:
+            return None
+        row = self._rows[0]
+        if isinstance(row, dict):
+            return row
+        return row.__dict__
+
+
+class _FakeGenerateBatchDb:
+    def __init__(self, rows, *, artifact_uri=""):
+        self._rows = rows
+        self._artifact_uri = artifact_uri
+        self.executed = []
+        self._select_count = 0
+
+    async def execute(self, statement, params=None):
+        text = str(statement)
+        self.executed.append((text, params or {}))
+        if "FROM agent_artifacts" in text:
+            return _FakeGenerateBatchResult(
+                [SimpleNamespace(uri=self._artifact_uri)] if self._artifact_uri else []
+            )
+        if "FROM shot_rows" in text and "ORDER BY shot_index ASC" in text:
+            self._select_count += 1
+            return _FakeGenerateBatchResult(self._rows)
+        return _FakeGenerateBatchResult()
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+
+def _shot_row(index, *, selected_image="", selected_video="", status="ready"):
+    return SimpleNamespace(
+        shot_index=index,
+        prompt=f"shot {index}",
+        duration=5,
+        status=status,
+        selected=True,
+        character_refs_json=[],
+        scene_refs_json=[],
+        prop_refs_json=[],
+        costume_refs_json=[],
+        style_refs_json=[],
+        image_candidates_json=[],
+        video_variants_json=[],
+        selected_image=selected_image,
+        selected_video=selected_video,
+        last_error="",
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+
+
+def _patch_generate_batch_dependencies(monkeypatch, sent):
+    async def noop_async(*_args, **_kwargs):
+        return None
+
+    async def true_async(*_args, **_kwargs):
+        return True
+
+    async def price(_operation):
+        return 10
+
+    async def reserve(_user_id, operation, _count):
+        return f"tx-{operation}-{len(sent)}"
+
+    class Capacity:
+        service = "seedream"
+        total_concurrency = 0
+        available_slots = 99
+        estimated_wait_sec = 0
+
+    def send_task(_name, args=None, **_kwargs):
+        sent.append((args or [None, None, {}])[2]["shot_index"])
+
+    monkeypatch.setattr(workbench, "revision_public_payload", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(workbench, "_guard_showrunner_generation_preflight", noop_async)
+    monkeypatch.setattr(workbench, "check_concurrent_limit", noop_async)
+    monkeypatch.setattr(workbench, "check_rate_limit", noop_async)
+    monkeypatch.setattr(workbench, "ensure_run_budget", true_async)
+    monkeypatch.setattr(workbench, "assert_cost_guard", noop_async)
+    monkeypatch.setattr(workbench.credit_service, "get_price", price)
+    monkeypatch.setattr(workbench, "reserve_credits", reserve)
+    monkeypatch.setattr(workbench, "write_project_workspace_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(workbench, "publish_agent_event", noop_async)
+    monkeypatch.setattr(workbench, "update_agent_run", noop_async)
+    monkeypatch.setattr(workbench.celery_app, "send_task", send_task)
+    monkeypatch.setattr("app.services.capacity_guard.check_capacity_sync", lambda _provider: Capacity())
 
 
 def test_continue_project_from_brain_generates_planning_files(monkeypatch):
@@ -32,6 +138,30 @@ def test_continue_project_from_brain_generates_planning_files(monkeypatch):
         shots = (storage / "continue-one" / "shots" / "episode-01-scene-01.json").read_text(encoding="utf-8")
         assert "continue action: generate_story_plan" in decisions
         assert "黄金回购" in shots
+    finally:
+        shutil.rmtree(storage.parent, ignore_errors=True)
+
+
+def test_continue_project_from_brain_generates_concrete_courier_office_shots(monkeypatch):
+    storage = Path("storage") / "test-project-continue" / uuid.uuid4().hex
+    monkeypatch.setattr(project_workspace, "STORAGE", storage)
+    try:
+        instruction = "我想做一段快递员送黄金区一个高档写字楼的视频"
+        result = project_continue.continue_project_from_brain(
+            "continue-courier-office",
+            instruction=instruction,
+            name="快递员高档写字楼送件",
+        )
+
+        assert result["applied"] is True
+        assert result["intent_constraints"]["story_type"] == "courier_office_delivery"
+        prompts = "\n".join(row["prompt"] for row in result["shot_rows"])
+        assert "快递员" in prompts
+        assert "高档写字楼" in prompts
+        assert "包裹" in prompts
+        assert "门禁" in prompts
+        assert "对手方" not in prompts
+        assert all("快递员" in row["prompt"] or "快递包裹" in row["prompt"] for row in result["shot_rows"])
     finally:
         shutil.rmtree(storage.parent, ignore_errors=True)
 
@@ -159,6 +289,74 @@ def test_production_action_does_not_continue_planning_loop():
     ) is False
 
 
+@pytest.mark.asyncio
+async def test_continue_project_brain_respects_requested_production_action(monkeypatch):
+    observed = {}
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return self._rows
+
+    class _Db:
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            if "SELECT name FROM projects" in sql:
+                return _Result([SimpleNamespace(name="project-1")])
+            if "FROM shot_rows" in sql:
+                return _Result([_shot_row(1, selected_image="https://cdn.test/1.png")])
+            return _Result([])
+
+        async def commit(self):
+            return None
+
+    async def noop_async(*_args, **_kwargs):
+        return None
+
+    async def dispatch_action(_db, *, action, **_kwargs):
+        observed["action"] = action
+        return {"status": "queued", "action": action}
+
+    monkeypatch.setattr(workbench, "_ensure_project_owner", noop_async)
+    monkeypatch.setattr(workbench, "_fetch_saved_final_edit_plan", AsyncMock(return_value=None))
+    monkeypatch.setattr(workbench, "_fetch_visual_plan_payload", AsyncMock(return_value=(None, None, None)))
+    monkeypatch.setattr(
+        workbench,
+        "build_project_brain",
+        lambda *_args, **_kwargs: {
+            "next_action": "generate_videos",
+            "can_continue": True,
+            "signals": {
+                "operational_pending_keyframe_count": 1,
+                "operational_pending_video_count": 1,
+                "workspace_shot_count": 1,
+            },
+            "context": {},
+        },
+    )
+    monkeypatch.setattr(workbench, "_fetch_project_tasks_for_agent_gate", AsyncMock(return_value=[]))
+    monkeypatch.setattr(workbench, "evaluate_action_gate", lambda *_args, **_kwargs: {"allowed": True})
+    monkeypatch.setattr(workbench.credit_service, "get_price", AsyncMock(return_value=10))
+    monkeypatch.setattr(workbench, "create_agent_run", AsyncMock(return_value="run-1"))
+    monkeypatch.setattr(workbench, "emit_brain_snapshot_steps", noop_async)
+    monkeypatch.setattr(workbench, "_dispatch_production_action", dispatch_action)
+
+    result = await workbench.continue_project_brain(
+        "project-1",
+        body={"action": "generate_keyframes", "mode": "step"},
+        db=_Db(),
+        current_user={"id": 7, "tier": "pro"},
+    )
+
+    assert observed["action"] == "generate_keyframes"
+    assert result["action"] == "generate_keyframes"
+
+
 def test_autopilot_continues_internal_preflight_repair_before_media_dispatch():
     after_brain = {
         "can_continue": False,
@@ -271,6 +469,44 @@ async def test_dispatch_production_action_passes_video_runtime_capabilities(monk
 
 
 @pytest.mark.asyncio
+async def test_dispatch_production_action_passes_shot_indices_to_generation_handler(monkeypatch):
+    observed = {}
+
+    async def fake_load(_db, *, run_id, user_id):
+        return None
+
+    async def fake_dispatch(_db, *, packet, context, handlers):
+        return await handlers["generate_keyframes"]()
+
+    async def fake_continue_keyframes(*_args, shot_indices=None, **_kwargs):
+        observed["shot_indices"] = shot_indices
+        return {"ok": True}
+
+    monkeypatch.setattr(workbench, "load_run_facts_from_snapshot", fake_load)
+    monkeypatch.setattr(workbench, "dispatch_authoritative_packet", fake_dispatch)
+    monkeypatch.setattr(workbench, "_continue_generate_keyframes", fake_continue_keyframes)
+
+    result = await workbench._dispatch_production_action(
+        object(),
+        action="generate_keyframes",
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={"signals": {"operational_pending_keyframe_count": 2, "workspace_shot_count": 2}},
+        name="project-1",
+        run_id="11111111-1111-1111-1111-111111111111",
+        run_mode="step",
+        result={"before": {}},
+        image_unit_price=12,
+        video_unit_price=80,
+        shot_indices=[3],
+    )
+
+    assert result == {"ok": True}
+    assert observed["shot_indices"] == [3]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_production_action_uses_canonical_decision_tick(monkeypatch):
     observed = {}
 
@@ -337,6 +573,207 @@ async def test_dispatch_production_action_uses_canonical_decision_tick(monkeypat
     assert result["decision_packet"]["reason"] == "canonical"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_production_action_uses_blocked_packet_fallback(monkeypatch):
+    observed = {}
+
+    async def fake_load(db, *, run_id, user_id):
+        return object()
+
+    def fake_evaluate(facts):
+        return workbench.DecisionTickResult(
+            packet_version="main_run_chain_phase1",
+            status="blocked",
+            action="generate_videos",
+            stage_id="generate_videos",
+            selected_lane="c_lane_production",
+            dispatchable=False,
+            allowed=False,
+            reason="selected_image missing",
+            missing=["selected_image"],
+            fallback_action="generate_keyframes",
+            active_task_count=0,
+            failed_task_count=0,
+            allowed_writes=["tasks", "shot_rows", "agent_events", "agent_runs"],
+            evidence={},
+            evidence_refs=[],
+            candidate_actions=[],
+            success_criteria=[],
+            budget={},
+            risk={},
+            failure_policy={},
+            mission={
+                "mission_id": "run-1:generate_videos",
+                "lane": "c_lane_production",
+                "action": "generate_videos",
+                "write_scope": ["tasks"],
+                "idempotency_key": "run-1:generate_videos",
+            },
+        )
+
+    async def fake_dispatch(db, *, packet, context, handlers):
+        observed["packet"] = packet
+        return {"decision_packet": packet.as_dict()}
+
+    monkeypatch.setattr(workbench, "load_run_facts_from_snapshot", fake_load)
+    monkeypatch.setattr(workbench, "evaluate_decision_tick", fake_evaluate)
+    monkeypatch.setattr(workbench, "dispatch_authoritative_packet", fake_dispatch)
+
+    result = await workbench._dispatch_production_action(
+        object(),
+        action="plan_visual_assets",
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={"signals": {"operational_pending_keyframe_count": 4, "workspace_shot_count": 8}},
+        name="project-1",
+        run_id="run-1",
+        run_mode="step",
+        result={},
+        image_unit_price=1,
+        video_unit_price=1,
+    )
+
+    assert observed["packet"].action == "generate_keyframes"
+    assert result["decision_packet"]["action"] == "generate_keyframes"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_production_action_uses_blocked_same_action_fallback(monkeypatch):
+    observed = {}
+
+    async def fake_load(db, *, run_id, user_id):
+        return object()
+
+    def fake_evaluate(facts):
+        return workbench.DecisionTickResult(
+            packet_version="main_run_chain_phase1",
+            status="blocked",
+            action="generate_videos",
+            stage_id="generate_videos",
+            selected_lane="c_lane_production",
+            dispatchable=False,
+            allowed=False,
+            reason="image_review_blockers",
+            missing=["image_review_blockers"],
+            fallback_action="generate_keyframes",
+            active_task_count=0,
+            failed_task_count=0,
+            allowed_writes=["tasks", "shot_rows", "agent_events", "agent_runs"],
+            evidence={},
+            evidence_refs=[],
+            candidate_actions=[],
+            success_criteria=[],
+            budget={},
+            risk={},
+            failure_policy={},
+            mission={
+                "mission_id": "run-1:generate_videos",
+                "lane": "c_lane_production",
+                "action": "generate_videos",
+                "write_scope": ["tasks"],
+                "idempotency_key": "run-1:generate_videos",
+            },
+        )
+
+    async def fake_dispatch(db, *, packet, context, handlers):
+        observed["packet"] = packet
+        return {"decision_packet": packet.as_dict()}
+
+    monkeypatch.setattr(workbench, "load_run_facts_from_snapshot", fake_load)
+    monkeypatch.setattr(workbench, "evaluate_decision_tick", fake_evaluate)
+    monkeypatch.setattr(workbench, "dispatch_authoritative_packet", fake_dispatch)
+
+    result = await workbench._dispatch_production_action(
+        object(),
+        action="generate_videos",
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={"signals": {"operational_pending_keyframe_count": 1, "workspace_shot_count": 1}},
+        name="project-1",
+        run_id="run-1",
+        run_mode="step",
+        result={},
+        image_unit_price=1,
+        video_unit_price=1,
+    )
+
+    assert observed["packet"].action == "generate_keyframes"
+    assert result["decision_packet"]["action"] == "generate_keyframes"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_production_action_preserves_manual_visual_asset_request(monkeypatch):
+    observed = {}
+
+    async def fake_load(db, *, run_id, user_id):
+        return object()
+
+    def fake_evaluate(facts):
+        return workbench.DecisionTickResult(
+            packet_version="main_run_chain_phase1",
+            status="execute",
+            action="generate_keyframes",
+            stage_id="generate_keyframes",
+            selected_lane="c_lane_production",
+            dispatchable=True,
+            allowed=True,
+            reason="canonical keyframe recommendation",
+            missing=[],
+            fallback_action="",
+            active_task_count=0,
+            failed_task_count=0,
+            allowed_writes=["tasks", "shot_rows", "agent_events", "agent_runs"],
+            evidence={},
+            evidence_refs=[],
+            candidate_actions=[],
+            success_criteria=[],
+            budget={},
+            risk={},
+            failure_policy={},
+            mission={
+                "mission_id": "run-1:generate_keyframes",
+                "lane": "c_lane_production",
+                "action": "generate_keyframes",
+                "write_scope": ["tasks"],
+                "idempotency_key": "run-1:generate_keyframes",
+            },
+        )
+
+    async def fake_dispatch(db, *, packet, context, handlers):
+        observed["packet"] = packet
+        return {"decision_packet": packet.as_dict()}
+
+    monkeypatch.setattr(workbench, "load_run_facts_from_snapshot", fake_load)
+    monkeypatch.setattr(workbench, "evaluate_decision_tick", fake_evaluate)
+    monkeypatch.setattr(workbench, "dispatch_authoritative_packet", fake_dispatch)
+
+    result = await workbench._dispatch_production_action(
+        object(),
+        action="plan_visual_assets",
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={"signals": {"operational_pending_keyframe_count": 4, "workspace_shot_count": 8}},
+        name="project-1",
+        run_id="run-1",
+        run_mode="step",
+        result={},
+        image_unit_price=1,
+        video_unit_price=1,
+        semantic_control={
+            "human_routing": {
+                "routing_source": "manual_selector",
+                "explicit_action": "plan_visual_assets",
+            }
+        },
+    )
+
+    assert observed["packet"].action == "plan_visual_assets"
+    assert result["decision_packet"]["action"] == "plan_visual_assets"
+
+
 def test_final_edit_rows_allow_partial_cut_from_existing_videos():
     rows = [
         {"shot_index": 1, "selected_video": "video-1.mp4"},
@@ -368,6 +805,177 @@ def test_generate_videos_credit_estimate_batches_multiple_ready_shots():
     ]
 
     assert _estimate_continue_credits("generate_videos", rows, image_unit=10, video_unit=80) == 320
+
+
+def test_normalize_continue_shot_indices_rejects_invalid_payload():
+    with pytest.raises(workbench.HTTPException) as exc:
+        workbench._normalize_continue_shot_indices("3")
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "shot_indices must be a list"
+
+
+def test_generate_video_requires_approved_director_protocol():
+    with pytest.raises(workbench.HTTPException) as exc:
+        workbench._guard_director_protocol_next_step(
+            "generate_videos",
+            {
+                "approval_status": "draft",
+                "allowed_next_step": False,
+                "task_type": "reference_image",
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert "director input protocol" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_continue_generate_batch_filters_requested_shot_indices(monkeypatch):
+    sent = []
+    db = _FakeGenerateBatchDb([
+        _shot_row(1, selected_image=""),
+        _shot_row(2, selected_image="https://cdn.test/2.png"),
+        _shot_row(3, selected_image=""),
+    ])
+    _patch_generate_batch_dependencies(monkeypatch, sent)
+
+    result = await workbench._continue_generate_batch(
+        db,
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={},
+        run_id="11111111-1111-1111-1111-111111111111",
+        media_type="keyframe",
+        shot_indices=[3],
+    )
+
+    assert sent == [3]
+    assert result["status"] == "queued"
+    assert result["task_ids"] == result["child_task_ids"]
+    assert result["task_id"] == result["child_task_ids"][0]
+    assert result["queued_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_continue_generate_batch_without_shot_indices_keeps_batch_targets(monkeypatch):
+    sent = []
+    db = _FakeGenerateBatchDb([
+        _shot_row(1, selected_image=""),
+        _shot_row(2, selected_image="https://cdn.test/2.png"),
+        _shot_row(3, selected_image=""),
+    ])
+    _patch_generate_batch_dependencies(monkeypatch, sent)
+
+    result = await workbench._continue_generate_batch(
+        db,
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={},
+        run_id="11111111-1111-1111-1111-111111111111",
+        media_type="keyframe",
+    )
+
+    assert sent == [1, 3]
+    assert result["queued_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_continue_generate_video_uses_selected_image_override(monkeypatch):
+    payloads = []
+    db = _FakeGenerateBatchDb([
+        _shot_row(2, selected_image="https://cdn.test/old.png"),
+    ])
+    _patch_generate_batch_dependencies(monkeypatch, [])
+    monkeypatch.setattr(
+        workbench.celery_app,
+        "send_task",
+        lambda _name, args=None, **_kwargs: payloads.append((args or [None, None, {}])[2]),
+    )
+
+    result = await workbench._continue_generate_batch(
+        db,
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={},
+        run_id="11111111-1111-1111-1111-111111111111",
+        media_type="video",
+        provider="seedance",
+        shot_indices=[2],
+        selected_image="https://cdn.test/new.png",
+    )
+
+    selected_updates = [
+        params
+        for statement, params in db.executed
+        if "SET selected_image = :selected_image" in statement
+    ]
+    assert result["queued_count"] == 1
+    assert payloads[0]["image_url"] == "https://cdn.test/new.png"
+    assert selected_updates[0]["selected_image"] == "https://cdn.test/new.png"
+
+
+@pytest.mark.asyncio
+async def test_continue_generate_ltx23_video_omits_reference_images(monkeypatch):
+    payloads = []
+    db = _FakeGenerateBatchDb([
+        _shot_row(2, selected_image="https://cdn.test/keyframe.png"),
+    ])
+    _patch_generate_batch_dependencies(monkeypatch, [])
+    monkeypatch.setattr(
+        workbench.celery_app,
+        "send_task",
+        lambda _name, args=None, **_kwargs: payloads.append((args or [None, None, {}])[2]),
+    )
+
+    result = await workbench._continue_generate_batch(
+        db,
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={},
+        run_id="11111111-1111-1111-1111-111111111111",
+        media_type="video",
+        provider="ltx2.3",
+        shot_indices=[2],
+    )
+
+    assert result["queued_count"] == 1
+    assert "image_url" not in payloads[0]
+    assert "ref_images" not in payloads[0]
+
+
+@pytest.mark.asyncio
+async def test_continue_generate_video_resolves_artifact_image_override(monkeypatch):
+    payloads = []
+    db = _FakeGenerateBatchDb([
+        _shot_row(2, selected_image="https://cdn.test/old.png"),
+    ], artifact_uri="https://cdn.test/artifact.png")
+    _patch_generate_batch_dependencies(monkeypatch, [])
+    monkeypatch.setattr(
+        workbench.celery_app,
+        "send_task",
+        lambda _name, args=None, **_kwargs: payloads.append((args or [None, None, {}])[2]),
+    )
+
+    result = await workbench._continue_generate_batch(
+        db,
+        project_id="project-1",
+        user_id=7,
+        user_tier="pro",
+        before={},
+        run_id="11111111-1111-1111-1111-111111111111",
+        media_type="video",
+        provider="seedance",
+        shot_indices=[2],
+        artifact_id="11111111-1111-1111-1111-111111111111",
+    )
+
+    assert result["queued_count"] == 1
+    assert payloads[0]["image_url"] == "https://cdn.test/artifact.png"
 
 
 def test_keyframe_repair_targets_review_failed_selected_images():
@@ -410,6 +1018,41 @@ def test_keyframe_repair_targets_review_failed_selected_images():
 
     assert [row["shot_index"] for row in targets] == [1]
     assert targets[0]["selected_image"] == "https://cdn.test/old-1.png"
+    assert targets[0]["regeneration"]["previous_selected_image"] == "https://cdn.test/old-1.png"
+
+
+def test_keyframe_generation_targets_review_failed_selected_images_without_repair_request():
+    rows = [
+        {
+            "shot_index": 1,
+            "prompt": "shot 1",
+            "selected_image": "https://cdn.test/old-1.png",
+            "status": "image_done",
+            "image_candidates": [
+                {
+                    "url": "https://cdn.test/old-1.png",
+                    "review": {"status": "needs_review"},
+                }
+            ],
+        },
+        {
+            "shot_index": 2,
+            "prompt": "shot 2",
+            "selected_image": "https://cdn.test/old-2.png",
+            "status": "image_done",
+            "image_candidates": [
+                {
+                    "url": "https://cdn.test/old-2.png",
+                    "review": {"status": "approved"},
+                }
+            ],
+        },
+    ]
+
+    targets = _keyframe_generation_targets(rows)
+
+    assert [row["shot_index"] for row in targets] == [1]
+    assert targets[0]["regeneration"]["reason"] == "image_review_blockers"
     assert targets[0]["regeneration"]["previous_selected_image"] == "https://cdn.test/old-1.png"
 
 

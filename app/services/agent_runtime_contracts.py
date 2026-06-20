@@ -27,6 +27,8 @@ CAPABILITY_REQUIREMENTS: dict[str, dict[str, Any]] = {
             "selected_video_writeback",
         },
         "provider_capabilities_any": {
+            "ltx23_image_to_video",
+            "ltx_image_to_video",
             "seedance_image_to_video",
             "kling_image_to_video",
         },

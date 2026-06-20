@@ -4,6 +4,34 @@ title ShortDrama Agent Run
 
 cd /d "%~dp0"
 
+echo [Agent] Checking Docker Desktop...
+docker info >nul 2>nul
+if errorlevel 1 (
+  echo [Agent] Docker is not ready. Starting Docker Desktop...
+  docker desktop start >nul 2>nul
+  if errorlevel 1 (
+    echo.
+    echo [Agent] Could not start Docker Desktop automatically.
+    echo [Agent] Open Docker Desktop manually, wait until it is running, then run this script again.
+    pause
+    exit /b 1
+  )
+
+  echo [Agent] Waiting for Docker daemon...
+  for /L %%i in (1,1,60) do (
+    docker info >nul 2>nul
+    if not errorlevel 1 goto :docker_ready
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 2" >nul
+  )
+
+  echo.
+  echo [Agent] Docker Desktop started, but the Docker daemon is still not ready.
+  echo [Agent] Open Docker Desktop and check for startup errors, then run this script again.
+  pause
+  exit /b 1
+)
+
+:docker_ready
 echo [Agent] Starting local SaaS services...
 docker compose up -d postgres redis api worker-video worker-image worker-text worker-admin beat nginx
 if errorlevel 1 (

@@ -19,6 +19,17 @@ from app.config import get_settings
 LOGGER = logging.getLogger(__name__)
 
 
+def _should_use_local_ltx() -> bool:
+    """Check if the local LTX Desktop should be preferred over the remote API."""
+    s = get_settings()
+    if not getattr(s, "ltx_desktop_auto_launch", False):
+        return False
+    if not getattr(s, "ltx_desktop_install_path", ""):
+        return False
+    install_path = Path(s.ltx_desktop_install_path)
+    return install_path.exists() and (install_path / "api_login_launcher.py").exists()
+
+
 def _ltx_workflow(prompt: str, image_url: str, duration: int) -> dict[str, Any]:
     width = 720
     height = 1280
@@ -190,11 +201,35 @@ _WORKFLOW_BUILDERS = {
     "wan": _wan_workflow,
 }
 
-_LTX_API_PROVIDERS = {"ltx2.3", "wan", "wan2.1", "wan2_1"}
+_JOY_ECHO_PROVIDERS = {"joy-echo", "joy_echo", "joyai-echo", "joyai_echo"}
+_LTX_API_PROVIDERS = {"ltx2.3", "wan", "wan2.1", "wan2_1", *_JOY_ECHO_PROVIDERS}
 LTX_DOWNLOAD_DIR = Path("storage") / "ltx_downloads"
 LTX_MIN_DURATION_SECONDS = 15.0
-LTX_MIN_WIDTH = 1088
-LTX_MIN_HEIGHT = 960
+LTX_REMOTE_MAX_DURATION_SECONDS = 15.0
+JOY_ECHO_MIN_DURATION_SECONDS = 30.0
+JOY_ECHO_REMOTE_MAX_DURATION_SECONDS = 300.0
+LTX_MIN_WIDTH = 960
+LTX_MIN_HEIGHT = 544
+
+
+def _env_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _env_float(name: str) -> float | None:
+    value = os.getenv(name)
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _ceil_to_multiple(value: int, multiple: int) -> int:
@@ -211,38 +246,69 @@ def _comfyui_api_url(path: str) -> str:
     return f"{_comfyui_url()}{path}"
 
 
-def _inference_api_url(path: str) -> str:
+def _is_joy_echo_provider(provider: str) -> bool:
+    return str(provider or "").strip().lower() in _JOY_ECHO_PROVIDERS
+
+
+def _joy_echo_api_base_url() -> str:
     settings = get_settings()
+    return str(getattr(settings, "joy_echo_api_base_url", "") or "").rstrip("/")
+
+
+def _use_joy_echo_api_config(provider: str) -> bool:
+    return _is_joy_echo_provider(provider) and bool(_joy_echo_api_base_url())
+
+
+def _inference_api_url(path: str, *, provider: str = "") -> str:
+    settings = get_settings()
+    if _is_joy_echo_provider(provider):
+        base_url = _joy_echo_api_base_url()
+        if base_url:
+            return f"{base_url}{path}"
     base_url = str(
         getattr(settings, "ltx_api_base_url", "")
+        or os.getenv("LTX_CUSTOM_VIDEO_API_BASE_URL", "")
         or getattr(settings, "inference_api_base_url", "")
         or "http://127.0.0.1:8100"
     ).rstrip("/")
     return f"{base_url}{path}"
 
 
-def _inference_api_key() -> str:
+def _inference_api_key(*, provider: str = "") -> str:
     settings = get_settings()
+    if _use_joy_echo_api_config(provider):
+        api_key = str(getattr(settings, "joy_echo_api_key", "") or "")
+        if api_key:
+            return api_key
+        raise RuntimeError("JOY_ECHO_API_KEY is required when JOY_ECHO_API_BASE_URL is configured")
     return str(
         getattr(settings, "ltx_api_key", "")
+        or os.getenv("LTX_CUSTOM_VIDEO_API_KEY", "")
         or getattr(settings, "inference_api_key", "")
         or getattr(settings, "comfyui_api_key", "")
         or "sk-default-dev-key"
     )
 
 
-def _inference_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {_inference_api_key()}"}
+def _inference_headers(extra: dict[str, str] | None = None, *, provider: str = "") -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {_inference_api_key(provider=provider)}"}
     if extra:
         headers.update(extra)
     return headers
 
 
-def _inference_json_request(path: str, payload: dict[str, Any], *, timeout: int = 60, method: str = "POST") -> dict[str, Any]:
+def _inference_json_request(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int = 60,
+    method: str = "POST",
+    provider: str = "",
+) -> dict[str, Any]:
     req = urllib.request.Request(
-        _inference_api_url(path),
+        _inference_api_url(path, provider=provider),
         data=json.dumps(payload).encode("utf-8"),
-        headers=_inference_headers({"Content-Type": "application/json"}),
+        headers=_inference_headers({"Content-Type": "application/json"}, provider=provider),
         method=method,
     )
     try:
@@ -256,8 +322,12 @@ def _inference_json_request(path: str, payload: dict[str, Any], *, timeout: int 
     return data if isinstance(data, dict) else {}
 
 
-def _inference_get(path: str, *, timeout: int = 30) -> dict[str, Any]:
-    req = urllib.request.Request(_inference_api_url(path), headers=_inference_headers(), method="GET")
+def _inference_get(path: str, *, timeout: int = 30, provider: str = "") -> dict[str, Any]:
+    req = urllib.request.Request(
+        _inference_api_url(path, provider=provider),
+        headers=_inference_headers(provider=provider),
+        method="GET",
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -301,18 +371,20 @@ def _local_ltx_file_url(filename: str) -> str:
 
 def _ltx_result_provider_label(provider: str) -> str:
     provider = str(provider or "").strip().lower()
+    if provider in _JOY_ECHO_PROVIDERS:
+        return "joy_echo_api"
     if provider == "ltx2.3":
         return "ltx_api_ltx2.3"
     return "ltx_api_wan2.1"
 
 
-def _download_ltx_output_locally(file_url: str, *, file_id: str = "") -> tuple[str, str]:
+def _download_ltx_output_locally(file_url: str, *, file_id: str = "", provider: str = "") -> tuple[str, str]:
     file_id = (file_id or _ltx_file_id_from_url(file_url)).strip()
     if not file_id or any(ch in file_id for ch in ("/", "\\", "..")):
         raise RuntimeError(f"LTX API returned invalid file_id for local download: {file_id!r}")
 
-    source_url = file_url if file_url.startswith(("http://", "https://")) else _inference_api_url(file_url)
-    req = urllib.request.Request(source_url, headers=_inference_headers())
+    source_url = file_url if file_url.startswith(("http://", "https://")) else _inference_api_url(file_url, provider=provider)
+    req = urllib.request.Request(source_url, headers=_inference_headers(provider=provider))
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             content = resp.read()
@@ -402,26 +474,42 @@ def _upload_image_to_inference_api(path: str | Path) -> str:
         raise RuntimeError(f"Inference API upload failed (HTTP {e.code}): {detail}") from e
     except Exception as e:
         raise RuntimeError(f"Inference API upload error: {e}") from e
-    file_id = str(data.get("file_id") or "").strip()
+    file_id = str(data.get("file_id") or data.get("id") or "").strip()
     if not file_id:
         raise RuntimeError(f"Inference API upload did not return file_id: {data}")
     return file_id
 
 
-def _submit_inference_job(payload: dict[str, Any]) -> str:
-    data = _inference_json_request("/v1/video/generate", payload, timeout=60)
+def _submit_inference_job(payload: dict[str, Any], *, provider: str = "") -> str:
+    data = _inference_json_request("/v1/video/generate", payload, timeout=60, provider=provider)
     job_id = str(data.get("task_id") or data.get("id") or "").strip()
     if not job_id:
         raise RuntimeError(f"LTX API did not return task_id: {data}")
     return job_id
 
 
-def _poll_inference_job(job_id: str, timeout: int = 1400) -> dict[str, Any]:
+def _ltx_completed_output(result: dict[str, Any]) -> dict[str, Any]:
+    for key in ("output", "result", "data", "video"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            return value
+    outputs = result.get("outputs")
+    if isinstance(outputs, list):
+        for item in outputs:
+            if isinstance(item, dict):
+                return item
+    return {}
+
+
+def _poll_inference_job(job_id: str, timeout: int = 1400, *, provider: str = "") -> dict[str, Any]:
     deadline = time.time() + timeout
     transient_errors = 0
     while time.time() < deadline:
         try:
-            data = _inference_get(f"/v1/tasks/{job_id}", timeout=30)
+            if provider:
+                data = _inference_get(f"/v1/tasks/{job_id}", timeout=30, provider=provider)
+            else:
+                data = _inference_get(f"/v1/tasks/{job_id}", timeout=30)
             transient_errors = 0
         except RuntimeError as exc:
             transient_errors += 1
@@ -449,42 +537,135 @@ def _poll_inference_job(job_id: str, timeout: int = 1400) -> dict[str, Any]:
     raise TimeoutError(f"LTX API task timeout after {timeout}s (task_id={job_id})")
 
 
-def _generate_ltx_inference_api_video(payload: dict[str, Any], *, provider: str = "ltx2.3") -> dict[str, Any]:
-    prompt = str(payload.get("prompt", "")).strip()
-    if not prompt:
-        raise ValueError("prompt is required for LTX API video generation")
-    duration = max(LTX_MIN_DURATION_SECONDS, float(payload.get("duration", LTX_MIN_DURATION_SECONDS) or LTX_MIN_DURATION_SECONDS))
-    timeout = int(payload.get("timeout_seconds") or payload.get("timeout") or 1400)
-    width = _ceil_to_multiple(max(LTX_MIN_WIDTH, int(payload.get("width") or LTX_MIN_WIDTH)), 32)
-    height = _ceil_to_multiple(max(LTX_MIN_HEIGHT, int(payload.get("height") or LTX_MIN_HEIGHT)), 32)
-    request_payload: dict[str, Any] = {
-        "prompt": prompt,
-        "image": _inference_image_ref(str(payload.get("image_url") or "")),
-        "duration": duration,
-        "width": width,
-        "height": height,
-        "steps": int(payload.get("steps") or 20),
-    }
-    if payload.get("model") is not None:
-        request_payload["model"] = payload.get("model")
-    if payload.get("seed") is not None:
-        request_payload["seed"] = payload.get("seed")
-    job_id = _submit_inference_job(request_payload)
-    result = _poll_inference_job(job_id, timeout=timeout)
-    output = result.get("output") if isinstance(result.get("output"), dict) else {}
-    url = str(output.get("url") or "").strip()
+def _complete_ltx_inference_result(
+    job_id: str,
+    request_payload: dict[str, Any],
+    *,
+    timeout: int,
+    provider: str,
+) -> dict[str, Any]:
+    use_joy_api = _use_joy_echo_api_config(provider)
+    if use_joy_api:
+        result = _poll_inference_job(job_id, timeout=timeout, provider=provider)
+    else:
+        result = _poll_inference_job(job_id, timeout=timeout)
+    output = _ltx_completed_output(result)
+    url = str(output.get("url") or output.get("video_url") or output.get("output_url") or "").strip()
+    file_id = str(output.get("file_id") or output.get("fileId") or _ltx_file_id_from_url(url)).strip()
+    if not url and file_id:
+        url = f"/v1/files/{file_id}"
     if not url:
-        raise RuntimeError(f"LTX API task completed but did not return output.url: {result}")
-    file_id = str(output.get("file_id") or _ltx_file_id_from_url(url)).strip()
-    local_url, file_id = _download_ltx_output_locally(url, file_id=file_id)
+        raise RuntimeError(f"LTX API task completed but did not return output url or file_id: {result}")
+    if use_joy_api:
+        local_url, file_id = _download_ltx_output_locally(url, file_id=file_id, provider=provider)
+    else:
+        local_url, file_id = _download_ltx_output_locally(url, file_id=file_id)
     return {
         "url": local_url,
         "width": int(output.get("width") or request_payload["width"]),
         "height": int(output.get("height") or request_payload["height"]),
-        "duration": float(output.get("duration") or duration),
+        "duration": float(output.get("duration") or request_payload["duration"]),
         "provider": _ltx_result_provider_label(provider),
         "prompt_id": job_id,
         "ltx_file_id": file_id,
+    }
+
+
+def _generate_ltx_inference_api_video(payload: dict[str, Any], *, provider: str = "ltx2.3") -> dict[str, Any]:
+    prompt = str(payload.get("prompt", "")).strip()
+    if not prompt:
+        raise ValueError("prompt is required for LTX API video generation")
+    normalized_provider = str(provider or "").strip().lower()
+    is_ltx23 = normalized_provider == "ltx2.3"
+    is_joy_echo = normalized_provider in _JOY_ECHO_PROVIDERS
+    is_text_only = is_ltx23 or is_joy_echo
+    use_ltx_api_defaults = is_ltx23 or is_joy_echo
+    min_duration = JOY_ECHO_MIN_DURATION_SECONDS if is_joy_echo else LTX_MIN_DURATION_SECONDS
+    max_duration = JOY_ECHO_REMOTE_MAX_DURATION_SECONDS if is_joy_echo else LTX_REMOTE_MAX_DURATION_SECONDS
+    env_duration = _env_float("LTX_CUSTOM_VIDEO_DURATION") if use_ltx_api_defaults else None
+    env_width = _env_int("LTX_CUSTOM_VIDEO_WIDTH") if use_ltx_api_defaults else None
+    env_height = _env_int("LTX_CUSTOM_VIDEO_HEIGHT") if use_ltx_api_defaults else None
+    duration_raw = payload.get("duration")
+    duration = float(duration_raw if duration_raw is not None else env_duration if env_duration is not None else min_duration)
+    if is_joy_echo or (duration_raw is None and env_duration is None):
+        duration = max(min_duration, duration)
+    if use_ltx_api_defaults and duration > max_duration:
+        return _generate_ltx_segmented_video(payload, provider=provider, duration=duration)
+    timeout = int(payload.get("timeout_seconds") or payload.get("timeout") or 1400)
+    width_raw = payload.get("width") if payload.get("width") is not None else env_width
+    height_raw = payload.get("height") if payload.get("height") is not None else env_height
+    width = _ceil_to_multiple(int(width_raw if width_raw is not None else LTX_MIN_WIDTH), 32)
+    height = _ceil_to_multiple(int(height_raw if height_raw is not None else LTX_MIN_HEIGHT), 32)
+    if env_width is None and payload.get("width") is None:
+        width = max(LTX_MIN_WIDTH, width)
+    if env_height is None and payload.get("height") is None:
+        height = max(LTX_MIN_HEIGHT, height)
+    request_payload: dict[str, Any] = {
+        "prompt": prompt,
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "steps": int(payload.get("steps") or (_env_int("LTX_CUSTOM_VIDEO_STEPS") if use_ltx_api_defaults else None) or 20),
+    }
+    if not is_text_only:
+        request_payload["image"] = _inference_image_ref(str(payload.get("image_url") or ""))
+    for source, target, caster in (
+        ("LTX_CUSTOM_VIDEO_MODE", "mode", str),
+        ("LTX_CUSTOM_VIDEO_PROFILE", "profile", str),
+        ("LTX_CUSTOM_VIDEO_CFG_SCALE", "cfg_scale", float),
+        ("LTX_CUSTOM_VIDEO_STG_SCALE", "stg_scale", float),
+    ):
+        value = payload.get(target)
+        if value is None and use_ltx_api_defaults:
+            value = os.getenv(source)
+        if value is not None and value != "":
+            request_payload[target] = caster(value)
+    if payload.get("model") is not None:
+        request_payload["model"] = payload.get("model")
+    if payload.get("seed") is not None:
+        request_payload["seed"] = payload.get("seed")
+    if _use_joy_echo_api_config(normalized_provider):
+        job_id = _submit_inference_job(request_payload, provider=normalized_provider)
+    else:
+        job_id = _submit_inference_job(request_payload)
+    return _complete_ltx_inference_result(job_id, request_payload, timeout=timeout, provider=provider)
+
+
+def _generate_ltx_segmented_video(payload: dict[str, Any], *, provider: str, duration: float) -> dict[str, Any]:
+    remaining = float(duration)
+    clips: list[dict[str, Any]] = []
+    normalized_provider = str(provider or "").strip().lower()
+    image_ref = "" if normalized_provider == "ltx2.3" or normalized_provider in _JOY_ECHO_PROVIDERS else _inference_image_ref(str(payload.get("image_url") or ""))
+    while remaining > 0:
+        clip_duration = min(LTX_REMOTE_MAX_DURATION_SECONDS, remaining)
+        clip_payload = {**payload, "duration": clip_duration}
+        if image_ref:
+            clip_payload["image_url"] = image_ref
+        clips.append(_generate_ltx_inference_api_video(clip_payload, provider=provider))
+        remaining -= clip_duration
+
+    sources = [str(clip.get("url") or "").strip() for clip in clips if str(clip.get("url") or "").strip()]
+    if not sources:
+        raise RuntimeError("LTX segmented generation did not produce any clips")
+
+    from app.services.video_edit import export_final_video
+
+    LTX_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    file_id = str(uuid4())
+    target = (LTX_DOWNLOAD_DIR / f"{file_id}.mp4").resolve()
+    temp_target = target.with_name(f"{file_id}.joining.mp4")
+    export_info = export_final_video(sources, str(temp_target), preview=False)
+    temp_target.replace(target)
+
+    return {
+        "url": _local_ltx_file_url(target.name),
+        "width": int(clips[0].get("width") or payload.get("width") or LTX_MIN_WIDTH),
+        "height": int(clips[0].get("height") or payload.get("height") or LTX_MIN_HEIGHT),
+        "duration": float(export_info.get("duration_sec") or duration),
+        "provider": _ltx_result_provider_label(provider),
+        "prompt_id": ",".join(str(clip.get("prompt_id") or "") for clip in clips if clip.get("prompt_id")),
+        "ltx_file_id": file_id,
+        "segments": clips,
     }
 
 
@@ -697,7 +878,17 @@ def generate_comfy_video(payload: dict[str, Any], api_key: str | None = None, **
     image_url = str(payload.get("image_url") or "").strip()
     provider = str(kwargs.get("provider") or payload.get("provider") or "ltx").lower()
 
+    # Route to local LTX Desktop if configured and available
     if provider in _LTX_API_PROVIDERS:
+        if provider not in _JOY_ECHO_PROVIDERS and _should_use_local_ltx():
+            from app.services.ltx_desktop import LtxDesktopService, LtxDesktopUnavailableError
+            service = LtxDesktopService()
+            if service.health().get("status") == "ok":
+                try:
+                    return service.generate_video(payload)
+                except LtxDesktopUnavailableError:
+                    LOGGER.warning("Local LTX Desktop unavailable, falling back to remote API")
+            # Fall through to remote API if desktop is not running
         return _generate_ltx_inference_api_video(payload, provider=provider)
 
     builder = _WORKFLOW_BUILDERS.get(provider)

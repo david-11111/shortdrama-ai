@@ -81,6 +81,120 @@ def test_seedance_adapter_injects_video_continuity_constraints_and_negative_prom
     assert "短剧冲突" in adapted["negative_prompt"]
 
 
+def test_seedream_adapter_injects_director_input_protocol():
+    adapted = adapt_provider_payload(
+        {
+            "provider": "seedream",
+            "prompt": "Lu Chenzhou half body front portrait",
+            "director_input_protocol": {
+                "task_type": "reference_image",
+                "asset_kind": "character",
+                "creative_intent": "live action role lock",
+                "must_avoid": ["anime face"],
+            },
+        },
+        task_type="image_gen",
+        provider="seedream",
+    )
+
+    assert "Lu Chenzhou half body front portrait" in adapted["prompt"]
+    assert "[director_input_protocol_v1]" in adapted["prompt"]
+    assert "creative_intent=live action role lock" in adapted["prompt"]
+    assert "anime face" in adapted["prompt"]
+
+
+def test_video_adapter_injects_director_input_protocol():
+    adapted = adapt_provider_payload(
+        {
+            "provider": "joy-echo",
+            "prompt": "slow push in",
+            "director_input_protocol": {
+                "task_type": "video",
+                "asset_kind": "shot_keyframe",
+                "creative_intent": "preserve reference identity and restrained emotion",
+            },
+        },
+        task_type="video_gen",
+        provider="joy-echo",
+    )
+
+    assert "slow push in" in adapted["prompt"]
+    assert "[director_input_protocol_v1]" in adapted["prompt"]
+    assert "preserve reference identity and restrained emotion" in adapted["prompt"]
+    assert adapted["provider_adapter"]["provider"] == "joy-echo"
+    assert adapted["provider_adapter"]["constraints_applied"] is True
+
+
+def test_ltx23_adapter_injects_director_input_protocol_for_joy_echo_backend():
+    adapted = adapt_provider_payload(
+        {
+            "provider": "ltx2.3",
+            "prompt": "slow push in",
+            "director_input_protocol": {
+                "task_type": "video",
+                "asset_kind": "shot_keyframe",
+                "creative_intent": "route through joy echo backend while preserving identity",
+            },
+        },
+        task_type="video_gen",
+        provider="ltx2.3",
+    )
+
+    assert "[director_input_protocol_v1]" in adapted["prompt"]
+    assert "route through joy echo backend while preserving identity" in adapted["prompt"]
+    assert adapted["provider_adapter"]["provider"] == "ltx2.3"
+    assert adapted["provider_adapter"]["constraints_applied"] is True
+
+
+def test_ltx23_adapter_does_not_apply_seedance_prompt_rules():
+    payload = {
+        "provider": "ltx2.3",
+        "prompt": "slow dolly across the gold necklace",
+        "image_url": "https://example.test/keyframe.png",
+        **_gold_jewelry_semantic(),
+    }
+
+    adapted = adapt_provider_payload(payload, task_type="video_gen", provider="ltx2.3")
+
+    assert adapted["provider_adapter"]["provider"] == "ltx2.3"
+    assert adapted["provider_adapter"]["constraints_applied"] is False
+    assert "agent_control_constraints_v1" not in adapted["prompt"]
+    assert "Animate from the selected keyframe" not in adapted["prompt"]
+    assert "negative_prompt" not in adapted
+
+
+def test_ltx23_adapter_keeps_continuity_text_without_ref_images():
+    adapted = adapt_provider_payload(
+        {
+            "provider": "ltx2.3",
+            "prompt": "slow push in",
+            "prev_shot_reference": "/api/media/local/ltx/prev.mp4",
+        },
+        task_type="video_gen",
+        provider="ltx2.3",
+    )
+
+    assert "ref_images" not in adapted
+    assert "prev_shot_reference" not in adapted
+    assert "镜头衔接控制" in adapted["prompt"]
+
+
+def test_seedance_adapter_keeps_continuity_reference_images():
+    adapted = adapt_provider_payload(
+        {
+            "provider": "seedance",
+            "prompt": "slow push in",
+            "prev_shot_reference": "https://cdn.test/prev.png",
+        },
+        task_type="video_gen",
+        provider="seedance",
+    )
+
+    assert adapted["ref_images"] == ["https://cdn.test/prev.png"]
+    assert "prev_shot_reference" not in adapted
+    assert "镜头衔接控制" in adapted["prompt"]
+
+
 def test_adapter_is_idempotent_and_legacy_payloads_still_get_quality_controls():
     payload = {"provider": "seedream", "prompt": "product close-up"}
 

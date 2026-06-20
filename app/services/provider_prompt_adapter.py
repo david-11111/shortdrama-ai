@@ -3,9 +3,36 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from app.services.director_input_protocol import (
+    DIRECTOR_PROTOCOL_VERSION,
+    director_protocol_prompt_block,
+)
 from app.services.visual_quality_rules import apply_video_motion_controls, apply_visual_quality_controls
 
 _ADAPTER_MARKER = "[agent_control_constraints_v1]"
+
+# text_only provider 集合（注册表初始化后填充）
+_TEXT_ONLY_PROVIDERS: set[str] = set()
+
+
+def _is_text_only(provider_name: str) -> bool:
+    """查 provider 是否纯文本输入（复用注册表数据，避免循环导入）。"""
+    if _TEXT_ONLY_PROVIDERS:
+        return provider_name in _TEXT_ONLY_PROVIDERS
+    # 懒加载：从 video_provider 注册表读
+    from app.services.video_provider import get_config
+    cfg = get_config(provider_name)
+    return cfg.text_only if cfg else False
+
+
+def _warm_text_only_cache() -> None:
+    """开机时调用：把注册表中的 text_only provider 名全部缓存。"""
+    from app.services.video_provider import get_config, list_all_names
+    _TEXT_ONLY_PROVIDERS.clear()
+    for name in list_all_names():
+        cfg = get_config(name)
+        if cfg and cfg.text_only:
+            _TEXT_ONLY_PROVIDERS.add(name)
 
 
 def adapt_provider_payload(
@@ -14,28 +41,32 @@ def adapt_provider_payload(
     task_type: str | None = None,
     provider: str | None = None,
 ) -> dict[str, Any]:
-    """Apply controller semantic constraints to the actual provider request.
-
-    The semantic packet is useful only if it reaches the final prompt consumed by
-    Doubao, Seedream or Seedance. This adapter is intentionally additive: callers
-    can pass legacy payloads with no semantic fields and get the original shape
-    back.
-    """
+    """Apply controller semantic constraints to the actual provider request."""
     next_payload = deepcopy(payload or {})
     provider_name = str(provider or next_payload.get("provider") or "").strip().lower()
     task_name = str(task_type or next_payload.get("task_type") or "").strip().lower()
 
     if task_name == "video_gen":
-        # Video-only motion hints. Keep keyframe prompts free of camera movement language.
-        _inject_continuity_reference(next_payload)
+        _inject_continuity_reference(next_payload, provider_name=provider_name)
         _inject_temporal_position(next_payload)
 
     if provider_name == "doubao" or task_name in {"director_script", "story_plan", "generate_story_plan"}:
         return adapt_doubao_payload(next_payload)
     if provider_name == "seedream" or task_name == "image_gen":
         return adapt_seedream_payload(next_payload)
-    if provider_name == "seedance" or task_name == "video_gen":
+
+    # 视频 provider：从注册表查适配器（延迟 import 打破循环）
+    from app.services.video_provider import get_config as _vp_get_config
+    vp_cfg = _vp_get_config(provider_name)
+    if vp_cfg and vp_cfg.adapter:
+        adapter_fn = globals().get(vp_cfg.adapter)
+        if adapter_fn:
+            return adapter_fn(next_payload)
+
+    # 未知 provider 的 video_gen 任务走 seedance 通用适配器
+    if task_name == "video_gen":
         return adapt_seedance_payload(next_payload)
+
     return _attach_adapter_meta(next_payload, applied=False, provider=provider_name, task_type=task_name)
 
 
@@ -51,10 +82,11 @@ def adapt_doubao_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def adapt_seedream_payload(payload: dict[str, Any]) -> dict[str, Any]:
     semantic = _semantic(payload)
+    director_applied = _inject_director_protocol(payload, target="seedream")
     block = _constraint_block(semantic, target="keyframe")
     if not block:
         payload["prompt"] = apply_visual_quality_controls(str(payload.get("prompt") or ""))
-        return _attach_adapter_meta(payload, applied=False, provider="seedream", task_type="image_gen")
+        return _attach_adapter_meta(payload, applied=director_applied, provider="seedream", task_type="image_gen")
     payload["prompt"] = apply_visual_quality_controls(_append_once(str(payload.get("prompt") or ""), block))
     _merge_negative_prompt(payload, semantic)
     return _attach_adapter_meta(payload, applied=True, provider="seedream", task_type="image_gen")
@@ -62,13 +94,31 @@ def adapt_seedream_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def adapt_seedance_payload(payload: dict[str, Any]) -> dict[str, Any]:
     semantic = _semantic(payload)
+    director_applied = _inject_director_protocol(payload, target="video")
     block = _constraint_block(semantic, target="video")
     if not block:
         payload["prompt"] = apply_video_motion_controls(str(payload.get("prompt") or ""))
-        return _attach_adapter_meta(payload, applied=False, provider="seedance", task_type="video_gen")
+        return _attach_adapter_meta(payload, applied=director_applied, provider="seedance", task_type="video_gen")
     payload["prompt"] = apply_video_motion_controls(_append_once(str(payload.get("prompt") or ""), block))
     _merge_negative_prompt(payload, semantic)
     return _attach_adapter_meta(payload, applied=True, provider="seedance", task_type="video_gen")
+
+
+def adapt_ltx_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    director_applied = _inject_director_protocol(payload, target="video")
+    return _attach_adapter_meta(payload, applied=director_applied, provider="ltx2.3", task_type="video_gen")
+
+
+def adapt_joy_echo_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    semantic = _semantic(payload)
+    director_applied = _inject_director_protocol(payload, target="joy-echo")
+    block = _constraint_block(semantic, target="video")
+    if not block:
+        payload["prompt"] = apply_video_motion_controls(str(payload.get("prompt") or ""))
+        return _attach_adapter_meta(payload, applied=director_applied, provider="joy-echo", task_type="video_gen")
+    payload["prompt"] = apply_video_motion_controls(_append_once(str(payload.get("prompt") or ""), block))
+    _merge_negative_prompt(payload, semantic)
+    return _attach_adapter_meta(payload, applied=True, provider="joy-echo", task_type="video_gen")
 
 
 def _semantic(payload: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +195,27 @@ def _append_once(base: str, block: str) -> str:
     return f"{base}\n\n{block}"
 
 
+def _inject_director_protocol(payload: dict[str, Any], *, target: str) -> bool:
+    protocol = payload.get("director_input_protocol")
+    if not isinstance(protocol, dict):
+        return False
+    prompt = str(payload.get("prompt") or "")
+    if f"[{DIRECTOR_PROTOCOL_VERSION}]" in prompt:
+        return False
+    payload["prompt"] = _append_director_block(prompt, director_protocol_prompt_block(protocol, target=target))
+    return True
+
+
+def _append_director_block(base: str, block: str) -> str:
+    base = str(base or "").strip()
+    block = str(block or "").strip()
+    if not block:
+        return base
+    if not base:
+        return block
+    return f"{base}\n\n{block}"
+
+
 def _merge_negative_prompt(payload: dict[str, Any], semantic: dict[str, Any]) -> None:
     constraints = semantic.get("constraints") or {}
     brief = semantic.get("brief") or {}
@@ -188,7 +259,7 @@ def _dedupe(values) -> list[str]:
     return result
 
 
-def _inject_continuity_reference(payload: dict[str, Any]) -> None:
+def _inject_continuity_reference(payload: dict[str, Any], *, provider_name: str = "") -> None:
     """Inject previous shot's output as continuity reference.
 
     If prev_shot_reference is present in the payload:
@@ -199,13 +270,14 @@ def _inject_continuity_reference(payload: dict[str, Any]) -> None:
     if not prev_ref:
         return
 
-    # Add to ref_images (used by some providers for style/composition guidance)
-    ref_images = payload.get("ref_images")
-    if isinstance(ref_images, list):
-        if prev_ref not in ref_images:
-            ref_images.append(prev_ref)
-    else:
-        payload["ref_images"] = [prev_ref]
+    # Add to ref_images only for providers that accept image/video references.
+    if not _is_text_only(provider_name):
+        ref_images = payload.get("ref_images")
+        if isinstance(ref_images, list):
+            if prev_ref not in ref_images:
+                ref_images.append(prev_ref)
+        else:
+            payload["ref_images"] = [prev_ref]
 
     # Append continuity hint to prompt
     prompt = str(payload.get("prompt") or "")

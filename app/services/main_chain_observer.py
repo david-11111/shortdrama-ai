@@ -19,7 +19,7 @@ async def observe_task_writeback(db: AsyncSession, task_id: str) -> list[dict[st
             text(
                 """
                 SELECT task_id::text AS task_id, run_id::text AS run_id, project_id,
-                       user_id, task_type, status, result
+                       user_id, task_type, status, result, payload
                 FROM tasks
                 WHERE task_id = CAST(:task_id AS UUID)
                 LIMIT 1
@@ -162,13 +162,18 @@ async def _load_db_artifacts(
     shots: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
-    if any(str(shot.get("selected_image") or "").strip() for shot in shots):
+    shot_index = _task_shot_index(task)
+    target_shots = [
+        shot for shot in shots
+        if shot_index is None or int(shot.get("shot_index") or 0) == shot_index
+    ]
+    if any(str(shot.get("selected_image") or "").strip() for shot in target_shots):
         artifacts.append({"artifact_type": "selected_image", "ref": "shot_rows:selected_image"})
-    if any(_has_json_items(shot.get("image_candidates_json")) for shot in shots):
+    if any(_has_json_items(shot.get("image_candidates_json")) for shot in target_shots):
         artifacts.append({"artifact_type": "image_candidate_metadata", "ref": "shot_rows:image_candidates_json"})
-    if any(str(shot.get("selected_video") or "").strip() for shot in shots):
+    if any(str(shot.get("selected_video") or "").strip() for shot in target_shots):
         artifacts.append({"artifact_type": "selected_video", "ref": "shot_rows:selected_video"})
-    if any(_has_json_items(shot.get("video_variants_json")) for shot in shots):
+    if any(_has_json_items(shot.get("video_variants_json")) for shot in target_shots):
         artifacts.append({"artifact_type": "video_variant_metadata", "ref": "shot_rows:video_variants_json"})
 
     artifact_rows = (
@@ -309,6 +314,17 @@ def _has_json_items(value: Any) -> bool:
     return isinstance(value, list) and bool(value)
 
 
+def _task_shot_index(task: dict[str, Any]) -> int | None:
+    payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    raw = payload.get("shot_index")
+    if raw in (None, "") and isinstance(payload.get("shot_row"), dict):
+        raw = payload["shot_row"].get("shot_index")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _missing_media_write_signal(
     *,
     task: dict[str, Any],
@@ -316,7 +332,12 @@ def _missing_media_write_signal(
     field: str,
     stage_id: str,
 ) -> list[ObservationSignal]:
-    if any(str(shot.get(field) or "").strip() for shot in shots):
+    shot_index = _task_shot_index(task)
+    target_shots = [
+        shot for shot in shots
+        if shot_index is None or int(shot.get("shot_index") or 0) == shot_index
+    ]
+    if any(str(shot.get(field) or "").strip() for shot in target_shots):
         return []
     task_id = str(task.get("task_id") or "")
     return [
@@ -329,7 +350,7 @@ def _missing_media_write_signal(
             stage_id=stage_id,
             summary=f"Task completed but {field} was not written back.",
             evidence_refs=[
-                {"kind": "shot_row", "field": field},
+                {"kind": "shot_row", "field": field, "shot_index": shot_index},
                 {"kind": "task", "id": task_id},
             ],
             suggested_recovery="repair_writeback",
